@@ -1,0 +1,23 @@
+{
+    "providers": {
+      "deepseek": {
+        "kind": "openai_compat",
+        "apiKey": "${DEEPSEEK_API_KEY}",
+        "baseUrl": "https://api.deepseek.com"
+      },
+      "siliconflow": {
+        "kind": "openai_compat",
+        "apiKey": "sk-你的硅基流动密钥",
+        "baseUrl": "https://api.siliconflow.cn/v1"
+      }
+    },
+    "modelPresets": {
+      "ds": { "provider": "deepseek", "model": "deepseek-v4-flash" },
+      "sf": { "provider": "siliconflow", "model": "deepseek-ai/DeepSeek-V3" }
+    },
+    "agents": {
+      "defaults": { "modelPreset": "ds" }
+    }
+    
+  }
+  
