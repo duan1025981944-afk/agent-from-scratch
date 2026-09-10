@@ -62,7 +62,7 @@ class AgentRunner:
                         f"没有名为{call.name}的工具。当前可用工具有：{available}"
                     )
                     messages.append({
-                        "role": "assistant",
+                        "role": "tool",
                         "tool_call_id": call.id,
                         "content": content,
                     })
