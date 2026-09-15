@@ -17,6 +17,12 @@ class Session:
     key: str
     meta: dict[str, Any] = field(default_factory=dict)
     history: list[dict[str, Any]] = field(default_factory=list)
+    summary: dict[str, Any] | None = None                         # 最后一条摘要记录
+ 
+    @property
+    def covered(self) -> int:
+        """摘要已经代表了 history 前面多少条。"""
+        return self.summary["covered"] if self.summary else 0
 
     def workspace_changed(self, current_root: str) -> str | None:
         """工作区变了就返回"当时的工作区"，没变返回 None。
@@ -28,6 +34,11 @@ class Session:
 
     def save_turn(self, new_messages: list[dict[str, Any]]) -> None:
         store.append_messages(self.key, new_messages)
+
+    def save_summary(self, summary: str, covered: int) -> None:
+        """记下一条摘要。原文不动，只追加一张便条。"""
+        store.append_summary(self.key, summary, covered)
+        self.summary = {"text": summary, "covered": covered}
 
 
 def create(model: str, workspace: str) -> Session:
@@ -48,6 +59,7 @@ def resume(key: str) -> Session:
         key=key,
         meta=store.load_meta(key) or {},
         history=store.load_messages(key),
+        summary=store.load_summary(key),
     )
 
 

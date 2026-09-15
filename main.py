@@ -3,24 +3,17 @@ from config.loader import load_config
 from providers.factory import create_provider  
 from agent.runner import AgentRunner, AgentRunSpec
 from agent.tools.loader import discover_tools
-from pathlib import Path
 from agent.tools import workspace
 import argparse
-from datetime import datetime
 from session import manager
+from agent.context import build_system_prompt
+from agent.compaction import compact_if_needed, restore_history
 
 # ★ 必须在 discover_tools() 之前
 root = workspace.set_root(".")      # 或从 config.json 读
 TOOLS = discover_tools()
 
-SYSTEM_PROMPT = f"""你是一个能读写文件的助手。
-
-工作区根目录：{root}
-所有文件操作都限制在这个目录及其子目录内，超出范围会被拒绝。
-路径可以用相对路径（相对于工作区根目录），例如 agent/runner.py。
-
-写文件前请先确认：write_file 会完全覆盖目标文件，不是追加或局部修改。
-"""
+SYSTEM_PROMPT = build_system_prompt(str(root))   # 内容在 templates/ 下
 
 def parse_args():
     p = argparse.ArgumentParser(description="mini_nanobot")
@@ -59,7 +52,7 @@ async def main():
         session = manager.create(cfg.model, str(root))
         print(f"[新会话 {session.key}]\n")
 
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + session.history
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + restore_history(session.history, session.summary)
 
     while True:
         user_input = input("你 > ").strip()
@@ -68,9 +61,16 @@ async def main():
         if not user_input:
             continue
 
+        # ★ 这一轮开始前先看要不要压缩；压完再算写盘边界
+        outcome = await compact_if_needed(messages, provider, covered=session.covered)
+        messages = outcome.messages
+        if outcome.summary:                                  # 压过才记，没压不写
+            session.save_summary(outcome.summary, outcome.covered)
+
         # ★② 写盘边界：记下这一轮开始前，列表有多长
         boundary = len(messages)
 
+        
         messages.append({"role": "user", "content": user_input})
 
         spec = AgentRunSpec(
