@@ -3,7 +3,7 @@ from providers.base import Provider
 from agent.tools.base import Tool
 from agent.tools.base import ToolResult
 import asyncio
-from agent.payload import build_payload  
+from agent.payload import CLEAR_TRIGGER, CONTEXT_BUDGET, PLACEHOLDER, build_payload, measure_payload
 
 
 # 统一的行动建议，附在所有错误文本后面
@@ -40,9 +40,25 @@ class AgentRunner:
         schemas = [t.to_schema() for t in spec.tools.values()] or None
 
         for i in range(spec.max_iterations):
-            print(f"  [第 {i + 1} 圈]")                      # 临时观察，7.6 之后可删
+            payload = build_payload(messages)
+            used, over = measure_payload(payload)
+            omitted = sum(1 for m in payload if m.get("content") == PLACEHOLDER)
+            note = f"，已省略 {omitted} 条旧工具结果" if omitted else ""
+            flag = f"，超过预算 {CONTEXT_BUDGET:,}" if over else ""
+            if not over and used > CLEAR_TRIGGER:
+                flag = f"，已过清理阈值 {CLEAR_TRIGGER:,}"
+            print(f"  [第 {i + 1} 圈] 上下文约 {used:,} token{note}{flag}")   # 临时观察
 
-            reply = await spec.provider.chat(build_payload(messages), tools=schemas)
+            reply = await spec.provider.chat(payload, tools=schemas)
+
+            u = reply.usage                                             # 临时观察
+            if u.prompt_tokens:
+                gap = (used - u.prompt_tokens) / u.prompt_tokens * 100
+                print(
+                    f"         实际 {u.prompt_tokens:,}（尺子误差 {gap:+.0f}%）"
+                    f"｜缓存命中 {u.cache_hit_tokens:,}，未命中 {u.cache_miss_tokens:,}"
+                    f"，命中率 {u.hit_rate:.0%}"
+                )
 
             # 无论要不要用工具，assistant 这条都必须先入链
             messages.append(reply.raw)
