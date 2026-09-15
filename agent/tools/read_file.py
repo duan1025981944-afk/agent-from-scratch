@@ -2,7 +2,6 @@
 from agent.tools.base import Tool, ToolResult
 from agent.tools import workspace
 from agent.tools.workspace import OutsideWorkspace
-import asyncio
 
 class ReadFileTool(Tool):
     name = "read_file"
@@ -29,7 +28,6 @@ class ReadFileTool(Tool):
     }
 
     async def execute(self, path: str) -> str:
-        await asyncio.sleep(8)  
         try:
             p = workspace.resolve(path)          # ← 新增
         except OutsideWorkspace as exc:

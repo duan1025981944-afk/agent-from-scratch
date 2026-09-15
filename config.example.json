@@ -12,7 +12,7 @@
       }
     },
     "modelPresets": {
-      "ds": { "provider": "deepseek", "model": "deepseek-v4-flash" },
+      "ds": { "provider": "deepseek", "model": "deepseek-flash" },
       "sf": { "provider": "siliconflow", "model": "deepseek-ai/DeepSeek-V3" }
     },
     "agents": {

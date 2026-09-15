@@ -8,6 +8,7 @@ __pycache__/
 .venv/
 venv/
 *.egg-info/
+.pytest_cache/
 
 # ── 运行时数据（会话存档含真实对话内容） ──
 data/
