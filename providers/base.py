@@ -16,12 +16,28 @@ class ToolCall:
 
 
 @dataclass
+class Usage:
+    """一次请求的用量。字段名与厂商无关，由各 Provider 负责翻译。"""
+ 
+    prompt_tokens: int = 0        # 输入总量（= 命中 + 未命中）
+    completion_tokens: int = 0    # 输出
+    cache_hit_tokens: int = 0     # 输入里命中缓存的部分，便宜很多
+    cache_miss_tokens: int = 0    # 输入里没命中的部分
+ 
+    @property
+    def hit_rate(self) -> float:
+        """缓存命中率，0.0 ~ 1.0。输入为 0 时返回 0。"""
+        return self.cache_hit_tokens / self.prompt_tokens if self.prompt_tokens else 0.0
+
+
+@dataclass
 class ModelReply:
     """模型的一次回复。"""
 
     content: str | None                          # 文本内容，调工具时可能为 None
     tool_calls: list[ToolCall] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)  # 原始 assistant 消息
+    usage: Usage = field(default_factory=Usage)        # 这次请求的用量
 
     @property
     def wants_tools(self) -> bool:

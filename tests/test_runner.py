@@ -151,3 +151,47 @@ def test_archive_keeps_full_text_while_model_sees_truncated(sandbox):
     assert len(sent) < 10_000, "发给模型的必须已被截断"
     assert "已截断" in sent, "截断后要告诉模型丢了内容"
     assert archived != sent
+
+# ─────────────────────── 第 14 讲：用量与缓存字段 ───────────────────────
+
+def test_usage_reads_deepseek_cache_fields():
+    """DeepSeek 的两个缓存字段要被翻译成统一的 Usage。"""
+    from providers.openai_compat import _read_usage
+
+    class FakeUsage:
+        prompt_tokens = 1000
+        completion_tokens = 50
+        prompt_cache_hit_tokens = 896
+        prompt_cache_miss_tokens = 104
+
+    class FakeResp:
+        usage = FakeUsage()
+
+    u = _read_usage(FakeResp())
+    assert (u.cache_hit_tokens, u.cache_miss_tokens) == (896, 104)
+    assert round(u.hit_rate, 2) == 0.90
+
+
+def test_usage_falls_back_to_openai_field_and_missing_usage():
+    """换成 OpenAI 风格的字段也要认；完全没有 usage 时不能报错。"""
+    from providers.base import Usage
+    from providers.openai_compat import _read_usage
+
+    class Details:
+        cached_tokens = 640
+
+    class FakeUsage:
+        prompt_tokens = 1000
+        completion_tokens = 50
+        prompt_tokens_details = Details()
+
+    class FakeResp:
+        usage = FakeUsage()
+
+    u = _read_usage(FakeResp())
+    assert (u.cache_hit_tokens, u.cache_miss_tokens) == (640, 360)   # 未命中是减出来的
+
+    class NoUsage:
+        usage = None
+
+    assert _read_usage(NoUsage()) == Usage()
