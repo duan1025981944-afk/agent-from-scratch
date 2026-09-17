@@ -36,7 +36,7 @@ description 里的反例，以及 templates/AGENTS.md 里那条
 """
 from agent.tools import workspace
 from agent.tools.base import Tool, ToolResult
-from agent.tools.workspace import OutsideWorkspace
+from agent.tools.workspace import OutsideWorkspace, ProtectedPath
 
 # 单次写入的字符上限。
 #
@@ -88,7 +88,8 @@ class WriteFileTool(Tool):
         "- 只想修改文件的一部分——本工具会覆盖整个文件，"
         "要改一部分请先用 read_file 读出原文，改好后把完整内容传进来\n"
         "- 写入二进制内容——本工具只写 UTF-8 文本\n"
-        "- 追加内容——本工具不支持追加，同样需要先读后写"
+        "- 追加内容——本工具不支持追加，同样需要先读后写\n"
+        "- 写入 data/ 目录——那里存的是聊天存档和长期记忆，只能读、不能改"
     )
 
     parameters = {
@@ -145,9 +146,10 @@ class WriteFileTool(Tool):
             覆盖之前不留旧版本。要回滚只能靠 git。
             这也是"真要放权跑长任务前得先有回退能力"那条原则的一个缺口。
         """
+        # 用 resolve_for_write 而不是 resolve：写入多一道禁区检查（data/ 不许写）
         try:
-            p = workspace.resolve(path)
-        except OutsideWorkspace as exc:
+            p = workspace.resolve_for_write(path)
+        except (OutsideWorkspace, ProtectedPath) as exc:
             return ToolResult.error(str(exc))
 
         if len(content) > MAX_CONTENT_CHARS:
