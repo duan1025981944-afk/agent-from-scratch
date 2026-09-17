@@ -57,18 +57,34 @@ load_messages 一个字都不用改。`_summary` 就是这么加进来的。
 "前 covered 条已经被这段摘要代表了"。
 
 ──────────────────────────────────────────────────────────────
-已知的三个短板（都记在待办里，还没修）
+坏行怎么办：跳过它，别连累整个文件（第 25 讲）
 ──────────────────────────────────────────────────────────────
-1. **没有容错**：任何一行 JSON 坏了（写到一半断电），load_messages 直接抛异常，
-   整个会话读不出来。
-2. **没有并发保护**：两个进程同时写同一个 key 会交错。单人 CLI 用不到。
-3. **load_meta 比 load_summary 脆**：前者只读第一行，meta 不在第一行就静默返回 None。
+追加写 + 断电/强杀，文件末尾很容易留下半行：
+
+    {"role": "user", "content": "帮我读一下 mai      <- 写到一半断了
+
+本来的写法是直接 json.loads(line)，**一行坏掉，整个会话读不出来**——
+几百轮对话全没了，只因为最后半行。
+
+现在所有读取都走 storage/jsonl.py 的 iter_records()，它遇到解析不了的行
+就跳过，并且只警告一次。那个函数是公共的——流水账 history.jsonl 也用它，
+细节写在那个文件的说明里。
+
+代价：坏行里的内容确实丢了，没法救。但"丢半句"远好过"丢全部"。
+
+──────────────────────────────────────────────────────────────
+还剩的两个短板（记在待办里）
+──────────────────────────────────────────────────────────────
+1. **没有并发保护**：两个进程同时写同一个 key 会交错。单人 CLI 用不到。
+2. **load_meta 比 load_summary 脆**：前者只读第一行，meta 不在第一行就静默返回 None。
 """
 from __future__ import annotations
 
 import json
 from datetime import datetime
 from pathlib import Path
+
+from storage.jsonl import iter_records as _iter_records
 from typing import Any
 
 # 会话文件都放在这里。
@@ -151,8 +167,9 @@ def load_messages(session_key: str) -> list[dict[str, Any]]:
         返回的是**存档全文**，不含 _meta、不含 _summary。要变成能直接发给
         模型的那份，还得过一道 agent/compaction.py 的 restore_history()。
 
-    会抛什么
-        json.JSONDecodeError —— 文件里有坏行时。这是已知短板，见文件顶部说明。
+    坏行怎么办
+        **跳过，其余照常返回**，并警告一次。见文件顶部"坏行怎么办"。
+        一行坏掉不该让几百轮对话全部读不出来。
 
     例子
         不存在的会话返回空列表：
@@ -160,20 +177,11 @@ def load_messages(session_key: str) -> list[dict[str, Any]]:
         >>> load_messages("这个会话不存在")
         []
     """
-    path = _path(session_key)
-    if not path.exists():
-        return []
-
     messages: list[dict[str, Any]] = []
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            obj = json.loads(line)
-            if "role" not in obj:          # 不是消息（_meta 头、_summary 便条）
-                continue
-            messages.append(obj)
+    for obj in _iter_records(_path(session_key)):
+        if "role" not in obj:              # 不是消息（_meta 头、_summary 便条）
+            continue
+        messages.append(obj)
     return messages
 
 
@@ -232,14 +240,8 @@ def load_meta(session_key: str) -> dict[str, Any] | None:
         >>> load_meta("这个会话不存在") is None
         True
     """
-    path = _path(session_key)
-    if not path.exists():
-        return None
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                return json.loads(line).get("_meta")
+    for obj in _iter_records(_path(session_key)):
+        return obj.get("_meta")            # 只看第一条读得懂的记录
     return None
 
 
@@ -328,18 +330,10 @@ def load_summary(session_key: str) -> dict[str, Any] | None:
         >>> load_summary("这个会话不存在") is None
         True
     """
-    path = _path(session_key)
-    if not path.exists():
-        return None
     latest: dict[str, Any] | None = None
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            obj = json.loads(line)
-            if "_summary" in obj:
-                latest = obj["_summary"]
+    for obj in _iter_records(_path(session_key)):
+        if "_summary" in obj:
+            latest = obj["_summary"]
     return latest
 
 
@@ -368,11 +362,7 @@ def count_messages(session_key: str) -> int:
         >>> count_messages("这个会话不存在")
         0
     """
-    path = _path(session_key)
-    if not path.exists():
-        return 0
-    with path.open("r", encoding="utf-8") as f:
-        return sum(1 for line in f if line.strip() and "role" in json.loads(line))
+    return sum(1 for obj in _iter_records(_path(session_key)) if "role" in obj)
 
 
 def list_keys() -> list[str]:
