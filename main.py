@@ -52,6 +52,7 @@ import asyncio
 
 from agent.compaction import compact_if_needed, restore_history
 from agent.context import build_system_prompt
+from agent.memory import read_memory
 from agent.runner import AgentRunner, AgentRunSpec
 from agent.tools import workspace
 from agent.tools.loader import discover_tools
@@ -74,10 +75,14 @@ root = workspace.set_root(".")
 # 加一个新工具 = 在 agent/tools/ 下新建一个 .py 文件，这里不用改。
 TOOLS = discover_tools()
 
-# 系统提示由 templates/ 下的文件拼成（SOUL.md + AGENTS.md + 运行时信息）。
+# 系统提示 = templates/ 下的模板（SOUL.md + AGENTS.md）+ 运行时信息 + 长期记忆。
 # 在这里算一次、之后每轮复用——它不变，所以能一直命中模型的提示缓存。
 # 想改 Agent 的性格或规矩，改 templates/ 里的 .md，不用碰代码（改完要重启）。
-SYSTEM_PROMPT = build_system_prompt(str(root))
+#
+# 长期记忆（data/memory/MEMORY.md）也是启动时读一次，改了同样要重启才生效。
+# 现在还没有"会话中途改记忆"的路径，所以够用；等第 27 讲 /dream 能在会话里跑时，
+# 再决定要不要改成每轮重拼。
+SYSTEM_PROMPT = build_system_prompt(str(root), read_memory())
 
 
 def parse_args() -> argparse.Namespace:

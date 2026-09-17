@@ -7,7 +7,8 @@
 
     SOUL.md      我是谁                  几乎不变      <- 缓存永远命中
     AGENTS.md    在这个工作区怎么做事      跟项目走
-    运行时        工作区根目录            每次运行可能不同
+    运行时        工作区根目录            换目录启动才变
+    长期记忆      MEMORY.md 正文          每次 Dream 后可能变（第 24 讲）
 
 **稳定的在前，变动的在后。** 这个顺序不是为了好看，是为了省钱，
 理由见下面"为什么顺序这么重要"。
@@ -44,8 +45,22 @@
 ──────────────────────────────────────────────────────────────
 往 LAYERS 列表末尾加一个文件名就行，函数不用改。
 
-阶段五要做的 MEMORY.md（Agent 自己写的跨会话笔记）就加在末尾——
-它变得最勤，本来就该排在最后。
+**但这只适用于 templates/ 下的模板。** 第 24 讲原本打算把 MEMORY.md
+也加进 LAYERS，实测 test_context.py 立刻红了三个：read_template 只认
+templates/，找不到就抛 FileNotFoundError；而"还没记过任何东西、文件不存在"
+对记忆来说是常态，不是错误。
+
+所以记忆走另一条路：由调用方（main.py）用 agent/memory.py 读好，
+当作参数传进来。两者的区别：
+
+    templates/SOUL.md 等      data/memory/MEMORY.md
+    作者（人）写              Agent 自己（经 Dream）写
+    进 git                    不进 git（含真实对话里的事实）
+    不存在 = bug，该报错       不存在 = 常态，当作没有记忆
+
+记忆排在运行时之后：实际使用中几乎总在同一个目录启动，运行时那段很少变；
+记忆却每整合一次就可能变。两者谁前谁后，缓存上的差别只有运行时那一段
+（约 17 token，用 tokens.py 的尺子量过），所以直接按"谁变得勤谁靠后"排。
 """
 from __future__ import annotations
 
@@ -57,17 +72,17 @@ from __future__ import annotations
 from agent.prompts import TEMPLATES_DIR, read_template  # noqa: F401
 
 # 按变动频率从低到高排列。**顺序就是拼装顺序，改这个列表就改了系统提示的结构。**
-# 阶段五的 MEMORY.md 往这个列表末尾加一行即可。
+# 只放 templates/ 下的模板：MEMORY.md **不能**加进来，原因见文件顶部"怎么加一层"。
 LAYERS = ["SOUL.md", "AGENTS.md"]
 
 
-def build_system_prompt(workspace_root: str) -> str:
+def build_system_prompt(workspace_root: str, memory: str = "") -> str:
     """读模板、拼成一条完整的系统提示。
 
     谁会用它
         main.py，在模块级初始化时调一次：
 
-            SYSTEM_PROMPT = build_system_prompt(str(root))
+            SYSTEM_PROMPT = build_system_prompt(str(root), read_memory())
 
         只调一次、之后每轮复用——因为它不变，才能一直命中缓存。
 
@@ -75,6 +90,13 @@ def build_system_prompt(workspace_root: str) -> str:
         workspace_root: 工作区的绝对路径（字符串）。
                         它是**运行时信息**：同一份代码，在不同目录启动
                         就会不一样，所以不能写进 .md 文件，只能由代码注入。
+        memory:         长期记忆正文，由 agent/memory.py 的 read_memory() 读好传进来。
+                        不传或传 ""（没记过东西）表示没有记忆，**整段不出现**，
+                        连标题都不加。
+
+                        为什么收"文本"而不收"路径"：让这个函数保持纯粹，
+                        同样的输入永远得到同样的输出、不碰磁盘。记忆存在哪、
+                        怎么读、读不到怎么办，全是 memory.py 的事。
 
     返回什么
         一整条系统提示（str），各层之间用空行隔开。形如：
@@ -92,6 +114,11 @@ def build_system_prompt(workspace_root: str) -> str:
             # 运行时
 
             工作区根目录：D:\\VibeCoding\\Agent\\mini_nanobot
+
+            # 长期记忆
+
+            - 用户的项目代号是 蓝鲸-7
+            ……
 
     拿到之后怎么用
         塞进 messages 的第一条：
@@ -112,10 +139,23 @@ def build_system_prompt(workspace_root: str) -> str:
         True
         >>> "D:/proj" in prompt                                # 运行时信息被注入了
         True
+
+        没有记忆时，整段不出现；有记忆时，排在最后：
+
+        >>> "# 长期记忆" in build_system_prompt("D:/proj")
+        False
+        >>> build_system_prompt("D:/proj", memory="- 用户叫 Himeko").endswith(
+        ...     "# 长期记忆\\n\\n- 用户叫 Himeko")
+        True
     """
     parts = [read_template(name) for name in LAYERS]
 
-    # 运行时信息放最后：它每次运行都可能不同，放前面会让后面全部错过缓存
+    # 运行时信息：换目录启动才会变，放在模板层之后
     parts.append(f"# 运行时\n\n工作区根目录：{workspace_root}")
+
+    # 长期记忆：变得最勤，放最后。没有就整段不加——
+    # 一个空标题既浪费 token，又会让模型以为"记忆是空的"是件值得注意的事
+    if memory:
+        parts.append(f"# 长期记忆\n\n{memory}")
 
     return "\n\n".join(parts)
