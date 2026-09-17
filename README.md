@@ -87,7 +87,7 @@ main.py                  编排层：命令行参数、一轮对话的先后顺�
 │   ├── SOUL.md          常驻层：我是谁
 │   ├── AGENTS.md        常驻层：在这个工作区怎么做事
 │   └── prompts/
-│       └── compaction.md  压缩历史时给模型的指令
+│       └── compaction.md  压缩历史时给模型的指令（末尾一节顺便提炼长期事实）
 │
 ├── agent/
 │   ├── runner.py        执行层：请求模型 → 要不要用工具 → 执行 → 下一圈
@@ -96,6 +96,7 @@ main.py                  编排层：命令行参数、一轮对话的先后顺�
 │   ├── context.py       上下文层：系统提示按变动频率分层拼装
 │   ├── tokens.py        上下文层：估算一份消息大约多少 token
 │   ├── prompts.py       模板文件的唯一入口
+│   ├── memory.py        记忆层：MEMORY.md（便利贴）的读取 + history.jsonl（流水账）的读写
 │   └── tools/
 │       ├── base.py      Tool 基类 + ToolResult
 │       ├── loader.py    基于 pkgutil 的工具自动发现
@@ -105,9 +106,16 @@ main.py                  编排层：命令行参数、一轮对话的先后顺�
 ├── session/
 │   ├── manager.py       存储层：会话生命周期（新建 / 恢复 / 列出 / 保存）
 │   └── messages.py      存储层：jsonl 底层读写
+├── storage/
+│   └── jsonl.py         最底层：逐行读 jsonl、跳过坏行（存档和流水账共用）
 │
-└── scripts/
-    └── check_tokens.py  一次性对账工具：估算值 vs 真实 usage
+├── data/                运行时数据，不进 git
+│   ├── sessions/        聊天存档
+│   └── memory/          MEMORY.md + history.jsonl
+│
+└── scripts/             一次性工具，不属于 Agent
+    ├── check_tokens.py  估算值 vs 真实 usage 对账
+    └── check_facts.py   调小触发线，看真模型提炼出什么事实
 ```
 
 
@@ -133,7 +141,7 @@ messages.append(user)
 session.save_turn(messages[boundary:])       整轮一次性落盘，先落盘再打印
 ```
 
-同一段对话有三种形态，别搞混（详见设计说明 §3）：
+同一段对话有三种形态，别搞混（详见 [docs/设计文档.md](docs/设计文档.md) §3）：
 
 
 |      | 内存 `messages` | 磁盘 jsonl | `payload`      |
@@ -149,8 +157,10 @@ session.save_turn(messages[boundary:])       整轮一次性落盘，先落盘�
 
 ## 设计决策
 
-完整的设计说明见 `[docs/设计说明.md](docs/设计说明.md)`：三层划分、一条消息的旅程、
-三份 messages 的区别、三条不变量、两道防线与四个阈值，以及十条「为什么放在这里」。
+完整的设计说明见 [docs/设计文档.md](docs/设计文档.md)。它分两部分：
+**回顾路线**（隔一段时间没看，从哪里开始一层层读完）和**设计说明**
+（分层规则表、一条消息的旅程、三份 messages 的区别、七条不变量、两道防线与阈值、
+十六条「为什么放在这里」、与 nanobot 的差异、负对照的测试写法）。
 
 几条最要紧的：
 
@@ -239,7 +249,7 @@ session.save_turn(messages[boundary:])       整轮一次性落盘，先落盘�
 | 2   | 工具系统：自动发现、边界检查、错误防御    | ✅   |
 | 3   | 会话持久化：jsonl 存档、存档与输入分离 | ✅   |
 | 4   | 上下文分层与压缩               | ✅   |
-| 5   | 记忆固化（Dream）            | ⬜   |
+| 5   | 记忆系统（注入 / 禁区 / 流水账 / 提炼 ✅，Dream 整理 ⬜） | 🔶  |
 | 6   | Skills 懒加载             | ⬜   |
 | 7   | MCP 桥接                 | ⬜   |
 | 8   | 子 Agent 委派             | ⬜   |
