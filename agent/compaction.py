@@ -31,6 +31,29 @@
 - 它**不**自己决定提示词内容。那在 templates/prompts/compaction.md
 
 ──────────────────────────────────────────────────────────────
+压缩时顺便做的第二件事：往流水账里记事实（第 26 讲）
+──────────────────────────────────────────────────────────────
+压缩本来就要调一次模型、要它通读这段历史。**既然它已经读完了，就顺便
+让它多写一节**："哪些事实即使换个会话也还有用"。
+
+    调一次模型
+        ├─ 五项摘要       -> 顶替原文，留在这次对话里，会话结束就没了
+        └─ 事实清单       -> 写进流水账 history.jsonl，跨会话留着
+
+为什么合成一次调用，不分两次
+    nanobot 就是这么做的：Consolidator.archive 产出的那份东西，
+    既当会话摘要返回，也 append 进 history.jsonl（见 summarize_transcript）。
+    分两次等于多花一次钱、多读一遍同样的历史。
+
+和 nanobot 的一处不同
+    nanobot 的摘要**整份**都是 `- [标签] 事实` 这种行。我们保留了原来的
+    五项散文，只在末尾加一节事实清单。因为我们的摘要还要负责"下一步""失败
+    过的尝试"这类叙事，做成纯事实行会丢掉它们。
+
+记事实失败了会怎样
+    不影响压缩。压缩是正事，记忆是锦上添花——见 memory.record_facts()。
+
+──────────────────────────────────────────────────────────────
 存档和摘要的关系（重要，也最容易绕晕）
 ──────────────────────────────────────────────────────────────
 **磁盘上永远是全文，摘要消息永远不写进去。**
@@ -52,6 +75,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from agent.payload import CONTEXT_BUDGET, build_payload
+from agent.memory import record_facts
 from agent.prompts import read_template
 from agent.tokens import estimate_tokens
 from providers.base import Provider
@@ -360,6 +384,7 @@ async def compact_if_needed(
     provider: Provider,
     budget: int = CONTEXT_BUDGET,
     covered: int = 0,
+    session: str = "",
 ) -> CompactionResult:
     """总入口：超预算就压缩，否则原样返回。
 
@@ -372,6 +397,8 @@ async def compact_if_needed(
         budget:   预算。默认 CONTEXT_BUDGET（190,000）。
                   测试里会传很小的值来逼出压缩行为。
         covered:  **之前**的摘要已经代表了存档前多少条。
+        session:  当前会话 key。只用来标记流水账里每条事实的出处（第 26 讲），
+                  压缩本身不需要它。不传照常工作，只是事实的"出处"是空的。
                   新会话传 0；恢复的会话传 session.covered。
                   漏传的话，第二次压缩算出来的 covered 会偏小，
                   下次恢复时会把已经被摘要代表过的消息又读一遍。
@@ -432,6 +459,13 @@ async def compact_if_needed(
 
     compacted = system + [summary_message(summary)] + recent
     after = estimate_tokens(build_payload(compacted))
+
+    # ★ 顺便把摘要里那节"值得长期记住的事实"记进流水账（第 26 讲）。
+    # 放在这里而不是放在 summarize() 里：summarize 只管"要一段文字"，
+    # 至于这段文字有什么用，是调用方的事。
+    written = record_facts(summary, session=session)
+    if written:
+        print(f"  [记入长期记忆流水账 {written} 条]")
 
     # 这次新盖住的是 old 里"真的来自存档"的那些——上一条摘要消息不算
     newly = sum(1 for m in old if not is_summary(m))

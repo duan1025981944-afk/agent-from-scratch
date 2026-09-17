@@ -51,6 +51,7 @@ nanobot 也是这么分的：包里的 templates/memory/MEMORY.md 只是个空�
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -108,13 +109,43 @@ def read_memory(path: Path = MEMORY_FILE) -> str:
 
 HISTORY_FILE = MEMORY_FILE.parent / "history.jsonl"
 
+# 每条事实的"保质期标签"。第 27 讲整理进 MEMORY.md 时，Dream 靠它决定
+# 谁该留、谁该换掉、谁过期了可以删。
+#
+#     permanent   长期不变：用户是谁、用什么系统、一贯的偏好
+#     durable     几个月：项目用了什么技术、架构决策、环境配置
+#     ephemeral   几周：当前在做哪个阶段、眼下的待办
+#     correction  纠正：推翻之前记错的说法
+#
+# 标签取自 nanobot 的 dream.md / consolidator_archive.md，它那里还有一个
+# [skip]（审计用、不进记忆）。我们在解析阶段就把 skip 丢掉了，所以存进
+# 流水账的记录里不会出现它。
+VALID_TAGS = ("permanent", "durable", "ephemeral", "correction")
+
+# 从摘要正文里认出事实行的规则。宽容一点：
+#
+#     - [permanent] 用户用 Windows        标准写法
+#     * [durable] 项目用 Chroma           换个符号
+#     [ephemeral] 正在做阶段五             没有前缀符号
+#     1. [durable] xxx                    带编号
+#
+# 认不出的行一律忽略——摘要正文的其他部分本来就不该进流水账。
+_FACT_LINE = re.compile(
+    r"^\s*(?:[-*•]|\d+[.、)])?\s*[\[【]\s*(\w+)\s*[\]】]\s*(.+?)\s*$"
+)
+
 # 单条正文的上限。超过就截断——这是防意外的保险丝，不是正常路径：
 # 正常的一条事实就一句话。nanobot 也有同样的兜底（_HISTORY_ENTRY_HARD_CAP），
 # 它防的是"模型把整段输入当摘要原样吐回来"这种事故。
 MAX_CONTENT_CHARS = 4_000
 
 
-def append_fact(content: str, session: str = "", path: Path = HISTORY_FILE) -> int:
+def append_fact(
+    content: str,
+    session: str = "",
+    tag: str = "durable",
+    path: Path | None = None,
+) -> int:
     """往流水账末尾记一条，返回它的编号。
 
     谁会用它
@@ -125,7 +156,13 @@ def append_fact(content: str, session: str = "", path: Path = HISTORY_FILE) -> i
         content: 一条事实的正文。建议一句话，例如 "用户的项目代号是 蓝鲸-7"。
                  超过 MAX_CONTENT_CHARS 会被截断并在末尾加省略号。
         session: 这条事实来自哪次会话（会话 key）。不传就是空字符串。
-        path:    流水账文件。平时不传，测试里传 tmp_path 下的文件。
+        tag:     保质期标签，取值见 VALID_TAGS。不传按 "durable" 算。
+                 不认识的标签会被换成 "durable" —— 模型偶尔会自创标签，
+                 为这个丢掉一条好事实不划算。
+        path:    流水账文件。平时不传，用 HISTORY_FILE；测试里传 tmp_path 下的文件。
+                 **默认值写成 None、在函数里才取 HISTORY_FILE**，不写成
+                 `path: Path = HISTORY_FILE`——后者在 def 那一刻就把值定死了，
+                 测试想整体换掉 HISTORY_FILE 就换不动，真实记忆会被测试污染。
 
     返回什么
         这条记录的编号（int）。第一条是 1，之后依次加一。
@@ -143,6 +180,7 @@ def append_fact(content: str, session: str = "", path: Path = HISTORY_FILE) -> i
         append_fact("用户的项目代号是 蓝鲸-7")  ->  1
         append_fact("用户在 USM 读研")          ->  2
     """
+    path = path or HISTORY_FILE       # 在调用时才取，测试才能换掉 HISTORY_FILE
     text = content.strip()
     if not text:
         raise ValueError("流水账不收空记录：content 去掉空白之后不能是空的。")
@@ -153,6 +191,7 @@ def append_fact(content: str, session: str = "", path: Path = HISTORY_FILE) -> i
     record = {
         "cursor": _next_cursor(path),
         "at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "tag": tag if tag in VALID_TAGS else "durable",
         "content": text,
         "session": session,
     }
@@ -164,7 +203,7 @@ def append_fact(content: str, session: str = "", path: Path = HISTORY_FILE) -> i
     return record["cursor"]
 
 
-def read_facts(since: int = 0, path: Path = HISTORY_FILE) -> list[dict[str, Any]]:
+def read_facts(since: int = 0, path: Path | None = None) -> list[dict[str, Any]]:
     """读出编号大于 since 的所有记录。
 
     谁会用它
@@ -184,6 +223,7 @@ def read_facts(since: int = 0, path: Path = HISTORY_FILE) -> list[dict[str, Any]
         read_facts()        ->  全部
         read_facts(since=2) ->  只有 3、4、5……
     """
+    path = path or HISTORY_FILE
     facts = [r for r in iter_records(path) if _valid_cursor(r) is not None]
     return [r for r in facts if r["cursor"] > since]
 
@@ -215,3 +255,97 @@ def _next_cursor(path: Path) -> int:
     """
     cursors = [c for r in iter_records(path) if (c := _valid_cursor(r)) is not None]
     return max(cursors, default=0) + 1
+
+def parse_facts(text: str) -> list[tuple[str, str]]:
+    """从模型写的摘要里，把"值得长期记住的事实"那些行挑出来。
+
+    谁会用它
+        agent/compaction.py：压缩成功后，把挑出来的事实逐条写进流水账。
+
+    传入什么
+        text: 模型返回的摘要全文。里面既有五项散文，也有末尾的事实清单。
+
+    返回什么
+        [(标签, 正文), ...]，按出现顺序。挑不出来就是空列表（**不是错误**：
+        有的对话就是没有值得长期记住的东西，模型写"（无）"是正确行为）。
+
+        以下行会被丢掉：
+            认不出格式的行          摘要的散文部分，本来就不该进流水账
+            [skip] 标签的行         nanobot 用它表示"只供审计，别存"
+            正文是"（无）""无""none" 模型表示"没有值得记的"
+            和前面完全重复的行      同一条事实模型有时会写两遍
+
+    为什么解析要宽容
+        模型不会每次都严格照格式写。为了一个方括号写成中文【】就丢掉一条
+        真事实，不划算。认不出的行忽略就好，代价只是少记一条。
+
+    为什么不在这里判断"这条事实对不对"
+        判断不了。正确性交给后面两道：第 27 讲整理时模型会合并冲突，
+        第 29 讲用户说"不对"时用 [correction] 推翻。这里只管**认字**。
+
+    例子
+        >>> parse_facts("1. 任务目标：随便什么")          # 散文行认不出，忽略
+        []
+        >>> parse_facts("- [permanent] 用户用 Windows")
+        [('permanent', '用户用 Windows')]
+        >>> parse_facts("* 【durable】项目用 Chroma")      # 中文方括号也认
+        [('durable', '项目用 Chroma')]
+        >>> parse_facts("- [skip] 这条只供审计")           # skip 丢掉
+        []
+        >>> parse_facts("- [ephemeral] （无）")            # 模型说"没有"
+        []
+    """
+    facts: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    for line in text.splitlines():
+        m = _FACT_LINE.match(line)
+        if not m:
+            continue
+
+        tag, content = m.group(1).lower(), m.group(2).strip()
+        if tag == "skip" or tag not in VALID_TAGS:
+            continue
+        if content.strip("（）() 　") in ("", "无", "none", "None"):
+            continue
+        if content in seen:
+            continue
+
+        seen.add(content)
+        facts.append((tag, content))
+
+    return facts
+
+
+def record_facts(
+    summary_text: str, session: str = "", path: Path | None = None
+) -> int:
+    """解析摘要、把里面的事实一条条记进流水账，返回记了几条。
+
+    谁会用它
+        agent/compaction.py，压缩成功之后。
+
+    传入什么
+        summary_text: 模型写的摘要全文。
+        session:      这次会话的 key，记在每条事实上，用于以后追溯出处。
+        path:         流水账文件。
+
+    返回什么
+        写进去的条数。没有可记的就是 0（正常情况，不是错误）。
+
+    它**不会**抛异常
+        记忆是锦上添花，压缩才是正事。磁盘满了、文件被占用……这些都不该
+        让一次成功的压缩变成失败。所以这里把异常吃掉，只在屏幕上提一句。
+
+    例子（碰文件系统，见 tests/test_fact_extraction.py）
+        record_facts("- [permanent] 用户用 Windows", session="2026...")  ->  1
+    """
+    path = path or HISTORY_FILE
+    written = 0
+    for tag, content in parse_facts(summary_text):
+        try:
+            append_fact(content, session=session, tag=tag, path=path)
+            written += 1
+        except (OSError, ValueError) as exc:
+            print(f"  [记忆写入失败，已跳过这条：{exc}]")
+    return written

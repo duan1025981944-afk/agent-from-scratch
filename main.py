@@ -242,7 +242,9 @@ async def main() -> None:
         # ── ① 压缩（一轮最多一次，要花钱）──
         # 只有"免费手段用完还超预算"时才真的会调模型；否则原样返回。
         # covered 要传进去，压缩内部靠它算出新的累计值。
-        outcome = await compact_if_needed(messages, provider, covered=session.covered)
+        outcome = await compact_if_needed(
+            messages, provider, covered=session.covered, session=session.key
+        )
         messages = outcome.messages
         if outcome.summary:             # 压过才记便条，没压不写
             session.save_summary(outcome.summary, outcome.covered)
