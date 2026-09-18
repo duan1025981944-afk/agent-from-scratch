@@ -31,7 +31,11 @@
     python main.py --list               列出所有历史会话后退出
 
     对话中输入 exit 或 quit 结束。
-    对话中输入 /dream 手动做一次"睡前整理"（把流水账并进长期记忆）。
+    对话中的本地命令（不发给模型、不进存档）：
+        /dream         手动做一次"睡前整理"：把流水账并进长期记忆
+        /memory        看当前的长期记忆
+        /memory-log    看最近几次整理各改了什么（程序算的 diff，不是模型自述）
+        /memory-undo   记忆被改坏了，退回上一版
 
 ──────────────────────────────────────────────────────────────
 一轮对话的完整顺序（这是本文件的核心）
@@ -69,7 +73,13 @@ import asyncio
 
 from agent.compaction import compact_if_needed, restore_history
 from agent.context import build_system_prompt
-from agent.memory import dream, read_memory
+from agent.memory import (
+    diff_memory,
+    dream,
+    list_snapshots,
+    read_memory,
+    restore_snapshot,
+)
 from agent.runner import AgentRunner, AgentRunSpec
 from agent.tools import workspace
 from agent.tools.loader import discover_tools
@@ -228,6 +238,86 @@ def open_session(requested_key: str | None, model: str) -> manager.Session:
     return session
 
 
+async def run_local_command(cmd: str, provider) -> bool:
+    """处理 / 开头的本地命令，返回"记忆有没有被改动"。
+
+    谁会用它
+        main() 的主循环。
+
+    传入什么
+        cmd:      用户敲的整行，形如 "/dream"、"/memory-undo"。
+        provider: /dream 要用它调模型。
+
+    返回什么
+        bool —— 记忆文件变了没有。变了的话调用方要重拼系统提示。
+
+    为什么这些命令要在主循环里**拦掉**，不发给模型
+        它们是给程序看的，不是给模型看的。发过去只会让模型困惑，
+        还白白占一轮上下文、花一次钱。
+
+        代价是"/"开头的正常提问会被误拦（比如问"/dream 是什么意思"）。
+        认不出的命令会提示一句可用列表，用户改个说法就行——
+        比"发给模型然后得到一个莫名其妙的回答"好。
+
+    命令一览
+        /dream         整理记忆
+        /memory        看当前记忆
+        /memory-log    看最近几次整理改了什么
+        /memory-undo   退回上一版
+
+    例子（要调模型/碰文件，不写成 doctest）
+        "/memory-log" 没有快照时  ->  打印"还没有任何快照"，返回 False
+    """
+    if cmd == "/dream":
+        outcome = await dream(provider)
+        print(f"\n  {outcome.note}")
+        if outcome.diff:
+            # ★ 这段 diff 是程序比对前后两版算出来的，不是模型自己说的。
+            # 模型漏抄一条时它自己不知道，只有逐行比对才看得见。
+            print("  这次实际改动：")
+            for line in outcome.diff.splitlines():
+                print(f"    {line}")
+        print()
+        return outcome.processed > 0
+
+    if cmd == "/memory":
+        current = read_memory()
+        print(f"\n{current or '（还没有任何长期记忆）'}\n")
+        return False
+
+    if cmd == "/memory-log":
+        snapshots = list_snapshots()
+        if not snapshots:
+            print("\n  还没有任何快照。（整理记忆时会自动存）\n")
+            return False
+
+        print(f"\n  最近 {len(snapshots)} 份快照，从新到旧：\n")
+        # 逐份和"它后面那一份"比，就能看出每一次整理改了什么。
+        # 最新那份要和**当前的 MEMORY.md** 比——它之后可能又整理过。
+        版本 = [read_memory()] + [
+            p.read_text(encoding="utf-8-sig") for p in snapshots
+        ]
+        for i, path in enumerate(snapshots):
+            改动 = diff_memory(版本[i + 1], 版本[i])
+            print(f"  [{i}] {path.stem}")
+            for line in (改动 or "（无改动）").splitlines():
+                print(f"        {line}")
+            print()
+        print("  用 /memory-undo 退回 [0] 那一版。\n")
+        return False
+
+    if cmd == "/memory-undo":
+        ok, note = restore_snapshot()
+        print(f"\n  {note}\n")
+        return ok
+
+    print(
+        "\n  不认识的命令。可用：/dream  /memory  /memory-log  /memory-undo"
+        "\n  （要跟模型说以 / 开头的话，换个说法，比如去掉开头的斜杠）\n"
+    )
+    return False
+
+
 async def main() -> None:
     """程序主流程：准备好一切，然后进入"读一句、答一句"的循环。
 
@@ -279,10 +369,9 @@ async def main() -> None:
 
         # /dream：手动做一次睡前整理。不进 messages，所以不占上下文、不写存档。
         # 这类以 / 开头的本地命令都该在这里拦掉，别让它们流到模型那边去。
-        if user_input == "/dream":
-            outcome = await dream(provider)
-            print(f"\n  {outcome.note}\n")
-            if outcome.processed:
+        if user_input.startswith("/"):
+            记忆变了 = await run_local_command(user_input, provider)
+            if 记忆变了:
                 # ★ 记忆变了，开场白要跟着换，否则模型这一轮看到的还是旧记忆。
                 # messages[0] 永远是系统提示（不变量：它只活在内存里，不进存档）。
                 messages[0] = {"role": "system", "content": current_system_prompt()}
@@ -335,6 +424,10 @@ async def main() -> None:
     outcome = await dream(provider)
     if outcome.processed or not outcome.ok:
         print(f"  [睡前整理] {outcome.note}")
+        if outcome.diff:
+            print("  实际改动（记错了就下次进来敲 /memory-undo）：")
+            for line in outcome.diff.splitlines():
+                print(f"    {line}")
 
 
 if __name__ == "__main__":

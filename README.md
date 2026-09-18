@@ -71,6 +71,16 @@ python main.py --list                 # 列出所有历史会话
 python main.py --session 20260909-165921   # 恢复指定会话
 ```
 
+对话中可以用的本地命令（不发给模型、不进存档）：
+
+```
+/dream         手动做一次"睡前整理"：把流水账并进长期记忆
+/memory        看当前的长期记忆
+/memory-log    看最近几次整理各改了什么（程序算的 diff，不是模型自述）
+/memory-undo   记忆被改坏了，退回上一版
+exit / quit    退出（退出前会自动整理一次）
+```
+
 ---
 
 
@@ -87,7 +97,8 @@ main.py                  编排层：命令行参数、一轮对话的先后顺�
 │   ├── SOUL.md          常驻层：我是谁
 │   ├── AGENTS.md        常驻层：在这个工作区怎么做事
 │   └── prompts/
-│       └── compaction.md  压缩历史时给模型的指令（末尾一节顺便提炼长期事实）
+│       ├── compaction.md  压缩历史时给模型的指令（末尾一节顺便提炼长期事实）
+│       └── dream.md       睡前整理：把流水账并进长期记忆
 │
 ├── agent/
 │   ├── runner.py        执行层：请求模型 → 要不要用工具 → 执行 → 下一圈
@@ -111,7 +122,7 @@ main.py                  编排层：命令行参数、一轮对话的先后顺�
 │
 ├── data/                运行时数据，不进 git
 │   ├── sessions/        聊天存档
-│   └── memory/          MEMORY.md + history.jsonl
+│   └── memory/          MEMORY.md + history.jsonl + snapshots/（记忆的历史版本）
 │
 └── scripts/             一次性工具，不属于 Agent
     ├── check_tokens.py  估算值 vs 真实 usage 对账
@@ -249,7 +260,7 @@ session.save_turn(messages[boundary:])       整轮一次性落盘，先落盘�
 | 2   | 工具系统：自动发现、边界检查、错误防御    | ✅   |
 | 3   | 会话持久化：jsonl 存档、存档与输入分离 | ✅   |
 | 4   | 上下文分层与压缩               | ✅   |
-| 5   | 记忆系统（注入 / 禁区 / 流水账 / 提炼 ✅，Dream 整理 ⬜） | 🔶  |
+| 5   | 记忆系统（注入 / 禁区 / 流水账 / 提炼 / Dream / 快照回滚 ✅，纠正 ⬜） | 🔶  |
 | 6   | Skills 懒加载             | ⬜   |
 | 7   | MCP 桥接                 | ⬜   |
 | 8   | 子 Agent 委派             | ⬜   |

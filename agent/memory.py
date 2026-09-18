@@ -57,8 +57,10 @@ nanobot 也是这么分的：包里的 templates/memory/MEMORY.md 只是个空�
 """
 from __future__ import annotations
 
+import difflib
 import json
 import re
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -72,7 +74,7 @@ from storage.jsonl import iter_records
 MEMORY_FILE = Path(__file__).resolve().parent.parent / "data" / "memory" / "MEMORY.md"
 
 
-def read_memory(path: Path = MEMORY_FILE) -> str:
+def read_memory(path: Path | None = None) -> str:
     """读出长期记忆的正文；没有记忆时返回空字符串。
 
     谁会用它
@@ -81,6 +83,12 @@ def read_memory(path: Path = MEMORY_FILE) -> str:
     传入什么
         path: 记忆文件路径。平时不用传，用默认的 MEMORY_FILE；
               测试里传 tmp_path 下的文件。
+
+              **默认值写成 None、在函数里才取 MEMORY_FILE**，和 append_fact
+              一样。写成 `path: Path = MEMORY_FILE` 的话，默认值在 def 那一刻
+              就定死了，之后再换掉 MEMORY_FILE 也没用——第 28 讲搭投毒现场时
+              就被这一条坑过：换了 MEMORY_FILE，read_memory() 照样读旧地址，
+              读出来是空的。
 
     返回什么
         str。去掉首尾空白后的正文。以下情况都返回 ""：
@@ -98,6 +106,7 @@ def read_memory(path: Path = MEMORY_FILE) -> str:
         文件内容 "\\n  \\n"   -> ""
         文件内容 "- 用户叫 Himeko\\n" -> "- 用户叫 Himeko"
     """
+    path = path or MEMORY_FILE
     if not path.exists():
         return ""
     return path.read_text(encoding="utf-8-sig").strip()
@@ -402,17 +411,23 @@ class DreamResult:
         processed: 这次处理了几条流水账。0 表示没有新的可整理（ok 为 True）。
         cursor:    整理之后的游标值。失败时是原值。
         note:      给人看的一句话说明，失败时说明原因。
+        diff:      这次整理**实际上**改了哪些行（第 28 讲）。由程序比对前后两版
+                   算出来，不是模型自己汇报的——模型漏抄一条时它自己不知道。
+                   没改动、或者没整理时是空字符串。
 
     例子
         >>> r = DreamResult(ok=True, processed=0, cursor=5, note="没有新事实")
         >>> r.ok and r.processed == 0          # 成功，但没什么可做
         True
+        >>> r.diff                             # 没整理，自然没有改动
+        ''
     """
 
     ok: bool
     processed: int
     cursor: int
     note: str
+    diff: str = ""
 
 
 def read_dream_cursor(path: Path | None = None) -> int:
@@ -507,6 +522,7 @@ async def dream(
     memory_path: Path | None = None,
     history_path: Path | None = None,
     cursor_path: Path | None = None,
+    snapshot_dir: Path | None = None,
 ) -> DreamResult:
     """睡前整理：把流水账上的新事实并进长期记忆。
 
@@ -515,8 +531,8 @@ async def dream(
 
     传入什么
         provider:     调模型用。和压缩用的是同一个。
-        memory_path / history_path / cursor_path:
-                      三个文件的位置。平时都不传，测试里传 tmp_path 下的。
+        memory_path / history_path / cursor_path / snapshot_dir:
+                      四个位置。平时都不传，测试里传 tmp_path 下的。
 
     返回什么
         DreamResult。四种情形：
@@ -580,6 +596,11 @@ async def dream(
         # 不管哪种，都不能拿一个空字符串去覆盖总账——那等于把记忆全删了。
         return DreamResult(False, 0, cursor, "模型没有返回内容，记忆未改动。")
 
+    # ★ 覆盖之前先拍快照（第 28 讲）。放在这里而不是函数开头：
+    # 前面任何一步失败都不会走到这儿，那些情况本来就没改文件，不用存。
+    旧总账 = read_memory(memory_path)
+    snapshot_memory(memory_path, snapshot_dir)
+
     # ★ 这两行必须紧挨着：写总账 + 推进游标，要么都做、要么都不做（不变量 8）
     memory_path.parent.mkdir(parents=True, exist_ok=True)
     memory_path.write_text(新总账 + "\n", encoding="utf-8")
@@ -589,4 +610,235 @@ async def dream(
     note = f"整理了 {len(batch)} 条事实。"
     if 剩下:
         note += f"还剩 {剩下} 条，下次接着整理。"
-    return DreamResult(True, len(batch), batch[-1]["cursor"], note)
+    return DreamResult(
+        True, len(batch), batch[-1]["cursor"], note,
+        diff=diff_memory(旧总账, 新总账),        # 程序算的，不是模型自己说的
+    )
+
+# ══════════════════════════════════════════════════════════════
+# 快照与回滚（第 28 讲）
+# ══════════════════════════════════════════════════════════════
+#
+# 第 27 讲的 Dream 是"整篇覆盖"——模型输出什么，MEMORY.md 就变成什么。
+# 第 28 讲搭了个投毒现场，一跑就撞出两个问题：
+#
+#     ① 错的事实被并进去了           流水账里混进一条"向量库用 Pinecone"
+#     ② 一条旧记忆被**悄悄漏抄**了    "提示词外置在 templates/" 没了
+#
+# 第 ② 个更阴险：屏幕上只说"整理了 1 条事实"，完全看不出丢了东西。
+# 而且旧内容已经被 write_text 覆盖，**磁盘上没有任何地方存着它**。
+#
+# 所以加两样东西，都不指望模型配合：
+#
+#     快照   覆盖之前先存一份带时间戳的副本   -> 退得回去
+#     diff   程序自己比对前后两版，逐行报告   -> 看得见改了什么
+#
+# **diff 必须由程序算，不能让模型自己汇报改了什么。** nanobot 在
+# GitStore.summarize_working_tree 的注释里写明了这一点：
+# "Pure filesystem/git ground truth — never LLM narrative"。
+# 道理很简单：模型漏抄了一条，它自己是不知道的——它以为自己抄全了。
+# 问它"你改了什么"，它只会复述它**打算**做的事。
+
+SNAPSHOT_DIR = MEMORY_FILE.parent / "snapshots"
+
+# 留最近多少份快照。更早的自动删掉。
+#
+# 为什么要有上限：每次整理都存一份，一天几十次就攒一堆。
+# 为什么是 10：够你回溯最近几次整理了。nanobot 靠 git 存全部历史，
+# 我们没引入 git（多一个 dulwich 依赖），先写死一个数——
+# 真需要翻很久以前的版本时再说。
+KEEP_SNAPSHOTS = 10
+
+
+def _free_snapshot_path(snapshot_dir: Path) -> Path:
+    """挑一个还没被占用的快照文件名。
+
+    只给 snapshot_memory() 用。
+
+    为什么时间戳要精确到微秒
+        原本只精确到秒，写测试时立刻撞车了：restore_snapshot() 会先给
+        "当前这版"拍一张，而它和 dream 刚拍的那张常常落在同一秒里——
+        后者把前者覆盖掉，于是"退回上一版"退了个寂寞。
+
+        改成毫秒还是撞。实测（写 200 个小文件量的）相邻两次写盘最短只隔
+        **19 微秒**，一毫秒内轻松塞进好几次。所以取微秒。
+
+    为什么有了微秒还要再查一遍存不存在
+        微秒够用，但"够快所以不会撞"是个假设，而这个假设一旦破了，
+        后果是**静默覆盖掉一份快照**——最不该静默失败的地方。
+        多三行循环，把假设变成保证。
+
+    往后加而不是往前减
+        撞名时把微秒数 +1 再试。加不会越过上一份快照，减会——
+        而 list_snapshots 靠文件名排序分新旧，顺序乱了整个回滚就废了。
+
+    例子（碰文件系统，见 tests/test_snapshot.py）
+        目录空的        ->  snapshots/MEMORY-20260918-164700-842317.md
+        那个名字已存在   ->  ...-842318.md
+    """
+    now = datetime.now()
+    秒 = f"{now:%Y%m%d-%H%M%S}"
+    微秒 = now.microsecond
+
+    while True:
+        target = snapshot_dir / f"MEMORY-{秒}-{微秒:06d}.md"
+        if not target.exists():
+            return target
+        微秒 += 1
+
+
+def snapshot_memory(
+    memory_path: Path | None = None,
+    snapshot_dir: Path | None = None,
+) -> Path | None:
+    """把当前的 MEMORY.md 存一份副本，返回副本的路径。
+
+    谁会用它
+        dream()，**在覆盖 MEMORY.md 之前**；以及 restore_snapshot()，
+        在回滚之前（撤销也要能被撤销）。
+
+    传入什么
+        memory_path:  要拍快照的文件。
+        snapshot_dir: 快照存哪。默认 data/memory/snapshots/。
+
+    返回什么
+        副本的路径。**记忆文件还不存在时返回 None**（第一次整理，没什么可存的）。
+
+    副本叫什么
+        MEMORY-20260918-164700-842317.md ——「文件名带时间戳」是最笨也最好用的
+        版本管理：按名字排序就是按时间排序，不用额外的索引文件。
+
+        时间戳精确到**微秒**，理由见 _free_snapshot_path()。
+
+    顺便做的事
+        超过 KEEP_SNAPSHOTS 份时，把最旧的删掉。
+
+    例子（碰文件系统，见 tests/test_snapshot.py）
+        记忆文件不存在  ->  None，什么都不做
+        记忆文件有内容  ->  snapshots/MEMORY-20260918-164700.md
+    """
+    memory_path = memory_path or MEMORY_FILE
+    snapshot_dir = snapshot_dir or SNAPSHOT_DIR
+
+    if not memory_path.exists():
+        return None                       # 还没有记忆，没什么可存的
+
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    target = _free_snapshot_path(snapshot_dir)
+    target.write_text(memory_path.read_text(encoding="utf-8-sig"), encoding="utf-8")
+
+    # 只留最近 KEEP_SNAPSHOTS 份。名字带时间戳，所以按名字排序 = 按时间排序。
+    老的 = list_snapshots(snapshot_dir)[KEEP_SNAPSHOTS:]
+    for path in 老的:
+        with suppress(OSError):
+            path.unlink()
+
+    return target
+
+
+def list_snapshots(snapshot_dir: Path | None = None) -> list[Path]:
+    """列出所有快照，**最新的排最前面**。
+
+    谁会用它
+        snapshot_memory()（清理旧的）、restore_snapshot()（找上一版）、
+        main.py 的 /memory-log。
+
+    返回什么
+        Path 列表，从新到旧。目录不存在就是空列表（不是错误）。
+
+    例子（见 tests/test_snapshot.py）
+        [snapshots/MEMORY-20260918-164700.md, snapshots/MEMORY-20260918-101200.md]
+    """
+    snapshot_dir = snapshot_dir or SNAPSHOT_DIR
+    if not snapshot_dir.exists():
+        return []
+    return sorted(snapshot_dir.glob("MEMORY-*.md"), reverse=True)
+
+
+def diff_memory(old: str, new: str) -> str:
+    """比对前后两版记忆，逐行报告增删。**由程序算，不问模型。**
+
+    谁会用它
+        dream()（整理完报告改了什么）、main.py 的 /memory-log。
+
+    传入什么
+        old / new: 两版记忆的正文。
+
+    返回什么
+        一段人看的文本，形如：
+
+            + 向量库用 Pinecone
+            - 提示词全部外置在 templates/，改文件即生效
+
+        没有任何变化时返回 ""（调用方据此决定要不要打印）。
+
+    为什么不用 difflib 的 unified_diff
+        那个格式带 @@ 行号和上下文行，适合给 patch 程序吃。
+        这里是给人扫一眼的，只关心"多了什么、少了什么"，
+        所以用 Differ 挑出 + 和 - 开头的行就够了。
+
+    为什么这件事一定要程序做
+        模型漏抄一条时，它自己是不知道的——它以为自己抄全了。
+        问它"你改了什么"，它只会复述它**打算**做的事，不是实际发生的事。
+        nanobot 的注释把这点说得很直白：
+        "Pure filesystem/git ground truth — never LLM narrative"。
+
+    例子
+        >>> 旧 = "- 从零复刻 nanobot\\n- 提示词外置在 templates/"
+        >>> 新 = "- 从零复刻 nanobot\\n- 向量库用 Pinecone"
+        >>> print(diff_memory(旧, 新))
+        - - 提示词外置在 templates/
+        + - 向量库用 Pinecone
+        >>> diff_memory("一样的", "一样的")
+        ''
+    """
+    差异 = difflib.Differ().compare(old.splitlines(), new.splitlines())
+    行 = [d for d in 差异 if d.startswith(("+ ", "- ")) and d[2:].strip()]
+    return "\n".join(行)
+
+
+def restore_snapshot(
+    which: int = 0,
+    memory_path: Path | None = None,
+    snapshot_dir: Path | None = None,
+) -> tuple[bool, str]:
+    """把 MEMORY.md 回滚到某一份快照。
+
+    谁会用它
+        main.py 的 /memory-undo。
+
+    传入什么
+        which:        用第几份快照。0 = 最新的一份（也就是"上一版"）。
+        memory_path / snapshot_dir: 两个位置，测试里会换掉。
+
+    返回什么
+        (成功了吗, 给人看的一句话)。
+
+    为什么回滚之前还要再拍一张快照
+        **撤销也要能被撤销。** 你回滚之后可能发现"其实刚才那版是对的"，
+        这时候得能再回来。不先拍一张的话，当前这版就被覆盖没了——
+        我们又回到了第 28 讲开头那个"退不回去"的处境，只是方向反过来。
+
+    为什么用序号而不用文件名
+        敲 /memory-undo 时最常见的需求是"退回上一版"，序号 0 最省事。
+        真要指定某一份时，/memory-log 会把序号列出来。
+
+    例子（见 tests/test_snapshot.py）
+        没有快照        ->  (False, "还没有任何快照……")
+        which=0        ->  (True, "已回滚到 MEMORY-20260918-164700.md")
+    """
+    memory_path = memory_path or MEMORY_FILE
+    snapshots = list_snapshots(snapshot_dir)
+
+    if not snapshots:
+        return False, "还没有任何快照，没法回滚。（快照是整理记忆时自动存的）"
+    if which >= len(snapshots):
+        return False, f"只有 {len(snapshots)} 份快照，没有第 {which} 份。"
+
+    # ★ 先把当前这版存下来，否则回滚本身就变成了不可逆操作
+    snapshot_memory(memory_path, snapshot_dir)
+
+    源 = snapshots[which]
+    memory_path.parent.mkdir(parents=True, exist_ok=True)
+    memory_path.write_text(源.read_text(encoding="utf-8-sig"), encoding="utf-8")
+    return True, f"已回滚到 {源.name}（回滚前那版也存成快照了，可以再退回来）"
