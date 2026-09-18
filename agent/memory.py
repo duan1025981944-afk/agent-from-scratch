@@ -13,9 +13,15 @@
 
 两者的关系，就是会计的日记账和总账：
 
-    流水账  一条一条往后记，记下来就不动    <- 第 25 讲做的
+    流水账  一条一条往后记，记下来就不动    <- 第 25、26 讲做的
     总账    定期把流水账整理成结论           <- 第 27 讲做的 Dream
     开场白  只贴总账，不贴流水账             <- 第 24 讲做的注入
+
+三个动作的分工，一句话说清：
+
+    append_fact   记一笔流水    只追加，不判断对错
+    dream         月底结账      读流水账 -> 整理 -> **覆盖**总账
+    read_memory   看总账        启动时读一次，拼进开场白
 
 流水账多了个"编号"（cursor），作用是记住"上次整理到第几条了"，
 下次只整理新的那些。和 _summary.covered 是同一个思路——**指针外化**。
@@ -26,6 +32,7 @@
 - 它**不**拼系统提示——那是 context.py 的事，它只拿到一段文本
 - 它**不**写 MEMORY.md——写入只归 Dream（第 27 讲），主 Agent 碰不到（第 24 讲下半）
 - 它**不**判断"什么事值得记"——那是第 26 讲提炼环节的事，这里只管存
+- 它**不**决定什么时候整理——那是 main.py 的事（退出时、或者你敲 /dream）
 - 它**不**是 templates/。见下面
 
 ──────────────────────────────────────────────────────────────
@@ -52,10 +59,13 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from agent.prompts import read_template
+from providers.base import Provider
 from storage.jsonl import iter_records
 
 # 记忆文件的唯一位置。测试里用 tmp_path 代替，不会碰到真文件。
@@ -349,3 +359,234 @@ def record_facts(
         except (OSError, ValueError) as exc:
             print(f"  [记忆写入失败，已跳过这条：{exc}]")
     return written
+
+# ══════════════════════════════════════════════════════════════
+# Dream 整理：流水账 -> 总账（第 27 讲）
+# ══════════════════════════════════════════════════════════════
+#
+# 一次整理干三件事：
+#
+#     ① 读游标之后的新事实       read_facts(since=游标)
+#     ② 交给模型，连同当前总账     一次调用
+#     ③ 覆盖 MEMORY.md、推进游标   两件事要么都做、要么都不做
+#
+# 游标存在一个单独的小文件里（指针外化），和 _summary.covered 是同一个思路：
+# **进度是个数字，单独存着，别每次从内容里猜。**
+# nanobot 叫 memory/.dream_cursor，我们叫 .dream_cursor，放在同一个目录。
+
+DREAM_CURSOR_FILE = MEMORY_FILE.parent / ".dream_cursor"
+
+# 一次最多整理多少条。和 nanobot 的 build_dream_prompt(max_entries=20) 同一个值。
+#
+# 为什么要有上限：流水账可能攒了几百条，一次全塞进去既贵又容易让模型顾此失彼。
+# 剩下的下次再整理——游标只推进到这一批的最后一条，下次从那儿接着来。
+DREAM_BATCH = 20
+
+# 整理用的提示词。正文在 templates/prompts/dream.md，改文件即生效。
+# 在 import 时就读：文件缺了要在启动时立刻报错，而不是等你敲 /dream 时才炸。
+DREAM_INSTRUCTION = read_template("prompts", "dream.md")
+
+
+@dataclass
+class DreamResult:
+    """一次 Dream 的结果。
+
+    谁会产生它
+        只有 dream()。
+
+    谁会用它
+        main.py：拿 ok 判断要不要打印成功信息，拿 processed 告诉用户整理了几条。
+
+    字段
+        ok:        整理成功了吗。**失败时 MEMORY.md 和游标都没动。**
+        processed: 这次处理了几条流水账。0 表示没有新的可整理（ok 为 True）。
+        cursor:    整理之后的游标值。失败时是原值。
+        note:      给人看的一句话说明，失败时说明原因。
+
+    例子
+        >>> r = DreamResult(ok=True, processed=0, cursor=5, note="没有新事实")
+        >>> r.ok and r.processed == 0          # 成功，但没什么可做
+        True
+    """
+
+    ok: bool
+    processed: int
+    cursor: int
+    note: str
+
+
+def read_dream_cursor(path: Path | None = None) -> int:
+    """读"上次整理到第几条"。没整理过就是 0。
+
+    谁会用它
+        dream()，以及想看进度的人。
+
+    传入什么
+        path: 游标文件。平时不传，测试里传 tmp_path 下的文件。
+
+    返回什么
+        int。以下情况一律返回 0（当作"从没整理过"）：
+            - 文件不存在
+            - 文件内容不是整数（被手改坏了）
+            - 是负数
+
+        **读不懂就当 0，不报错。** 最坏的后果是把已经整理过的事实再整理一遍，
+        而 Dream 本来就是幂等的（同样的事实合并两次，结果一样）。
+        为这个崩掉整个程序不值得。
+
+    例子（碰文件系统，见 tests/test_dream.py）
+        文件不存在   -> 0
+        文件内容 "7" -> 7
+        文件内容 "坏了" -> 0
+    """
+    path = path or DREAM_CURSOR_FILE
+    try:
+        value = int(path.read_text(encoding="utf-8-sig").strip())
+    except (ValueError, OSError):      # 文件不存在也走这里：FileNotFoundError 是 OSError
+        return 0
+    return value if value >= 0 else 0
+
+
+def write_dream_cursor(cursor: int, path: Path | None = None) -> None:
+    """记下"整理到第几条了"。
+
+    谁会用它
+        dream()，**只在整理成功之后调**。这是不变量 8 的一半。
+
+    传入什么
+        cursor: 这次整理到的最后一条的编号。
+        path:   游标文件。
+    """
+    path = path or DREAM_CURSOR_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(str(cursor), encoding="utf-8")
+
+
+def build_dream_prompt(memory: str, facts: list[dict[str, Any]]) -> str:
+    """拼出整理用的提示词：指令 + 当前总账 + 新流水账。
+
+    谁会用它
+        dream()。单独抽出来是为了能不调模型就测它（拼词是纯函数）。
+
+    传入什么
+        memory: 当前 MEMORY.md 的正文。第一次整理时是空字符串。
+        facts:  read_facts() 返回的那些记录。
+
+    返回什么
+        一整段提示词（str）。
+
+    为什么当前总账要放进提示词
+        模型要输出**整篇新的**总账，就必须先看到旧的长什么样——
+        否则它只能凭新事实重写，旧内容全丢。
+
+        （nanobot 不用这么做：它的 Dream 是个能读文件的受限 Agent，
+        当前记忆通过系统提示进去，它自己用 edit_file 改。我们这里是
+        一次性调用，所以要手动喂进去。取舍见 dream() 的说明。）
+
+    例子
+        >>> p = build_dream_prompt("", [{"tag": "permanent", "content": "用户用中文"}])
+        >>> "[permanent] 用户用中文" in p
+        True
+        >>> "（这是第一次整理，还没有长期记忆）" in p
+        True
+    """
+    lines = [f"[{f.get('tag', 'durable')}] {f.get('content', '')}" for f in facts]
+    current = memory.strip() or "（这是第一次整理，还没有长期记忆）"
+
+    return (
+        f"{DREAM_INSTRUCTION}\n\n"
+        f"---\n\n"
+        f"## 当前的长期记忆\n\n{current}\n\n"
+        f"---\n\n"
+        f"## 新的流水账（{len(facts)} 条）\n\n" + "\n".join(lines)
+    )
+
+
+async def dream(
+    provider: Provider,
+    memory_path: Path | None = None,
+    history_path: Path | None = None,
+    cursor_path: Path | None = None,
+) -> DreamResult:
+    """睡前整理：把流水账上的新事实并进长期记忆。
+
+    谁会用它
+        main.py：你敲 /dream 时，以及退出程序时。
+
+    传入什么
+        provider:     调模型用。和压缩用的是同一个。
+        memory_path / history_path / cursor_path:
+                      三个文件的位置。平时都不传，测试里传 tmp_path 下的。
+
+    返回什么
+        DreamResult。四种情形：
+
+            没有新事实        ok=True,  processed=0   什么都没做，也不算失败
+            调模型失败        ok=False, processed=0   MEMORY.md 和游标都没动
+            模型返回空/太短    ok=False, processed=0   同上
+            整理成功          ok=True,  processed=N   MEMORY.md 被覆盖，游标推进
+
+    它保证什么（不变量 8）
+        **没正常跑完，绝不推进游标。**
+
+        推进了游标就等于宣布"这批事实已经整理进总账了"。要是模型其实失败了，
+        这批事实就永远不会再被整理——它们还在流水账里，但再也没人看它们一眼。
+        所以写 MEMORY.md 和推进游标这两件事必须**同时发生**，
+        代码里它们紧挨着，中间不能有任何可能失败的东西。
+
+    为什么是"一次调用、整篇覆盖"，而不是像 nanobot 那样起个受限 Agent
+        nanobot 的 Dream 是一个只有文件工具的小 Agent，它自己 read_file 看当前
+        记忆、再用 edit_file 精确改几行（见 MemoryStore.build_dream_tools）。
+
+        我们选了更笨的办法：一次调用，让模型输出整篇新的，直接覆盖。
+
+            受限 Agent      改得精确，不容易误删；但要先有 edit_file，
+                            还要给 runner 传一套不同的工具，工程量大
+            整篇覆盖        实现只有十几行；代价是模型可能**悄悄漏抄**一条旧记忆
+
+        选后者的理由是"先写死再抽象"：我们的总账很小（几十行），整篇重写的
+        风险可控。而"悄悄漏抄"这个风险，正好是第 28 讲要用快照和 diff 解决的——
+        **先撞坏再加固**。等真撞上了，再考虑要不要换成受限 Agent。
+
+    为什么写 MEMORY.md 不走 write_file 工具
+        第 24 讲下半定的禁区：`data/` 里的文件，工具一律不许写。
+        Dream 不是工具，它是程序自己的一段代码，直接 write_text 就行——
+        **围栏拦的是模型，不是我们自己。**
+
+        这样禁区那条不变量不用开任何口子，主 Agent 依然碰不到记忆。
+
+    例子（要调模型，见 tests/test_dream.py）
+        没有新事实       -> DreamResult(ok=True, processed=0, ...)
+        模型返回空       -> DreamResult(ok=False, ...)，文件没动
+    """
+    memory_path = memory_path or MEMORY_FILE
+    cursor = read_dream_cursor(cursor_path)
+    facts = read_facts(since=cursor, path=history_path)
+
+    if not facts:
+        return DreamResult(True, 0, cursor, "流水账里没有新事实，不用整理。")
+
+    batch = facts[:DREAM_BATCH]
+    prompt = build_dream_prompt(read_memory(memory_path), batch)
+
+    try:
+        reply = await provider.chat([{"role": "user", "content": prompt}])
+        新总账 = (reply.content or "").strip()
+    except Exception as exc:                      # noqa: BLE001 —— 整理失败不该炸掉程序
+        return DreamResult(False, 0, cursor, f"整理时调模型失败：{exc}")
+
+    if not 新总账:
+        # 模型返回空。可能是被安全策略拦了、可能是超时截断了。
+        # 不管哪种，都不能拿一个空字符串去覆盖总账——那等于把记忆全删了。
+        return DreamResult(False, 0, cursor, "模型没有返回内容，记忆未改动。")
+
+    # ★ 这两行必须紧挨着：写总账 + 推进游标，要么都做、要么都不做（不变量 8）
+    memory_path.parent.mkdir(parents=True, exist_ok=True)
+    memory_path.write_text(新总账 + "\n", encoding="utf-8")
+    write_dream_cursor(batch[-1]["cursor"], cursor_path)
+
+    剩下 = len(facts) - len(batch)
+    note = f"整理了 {len(batch)} 条事实。"
+    if 剩下:
+        note += f"还剩 {剩下} 条，下次接着整理。"
+    return DreamResult(True, len(batch), batch[-1]["cursor"], note)

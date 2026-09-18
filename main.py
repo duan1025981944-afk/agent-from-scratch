@@ -31,6 +31,7 @@
     python main.py --list               列出所有历史会话后退出
 
     对话中输入 exit 或 quit 结束。
+    对话中输入 /dream 手动做一次"睡前整理"（把流水账并进长期记忆）。
 
 ──────────────────────────────────────────────────────────────
 一轮对话的完整顺序（这是本文件的核心）
@@ -45,6 +46,22 @@
     为什么 ② 要在 ① 之后：压缩会让 messages 变短，边界必须按压缩后的长度算，
     否则 ⑤ 会从错误的位置开始切，把旧消息重复写进存档。
 
+──────────────────────────────────────────────────────────────
+退出时还有一件事：睡前整理（第 27 讲）
+──────────────────────────────────────────────────────────────
+敲 exit 之后不是直接走人，先把流水账并进长期记忆（agent/memory.py 的 dream）。
+
+**为什么放在退出时**：nanobot 的主触发是"会话闲置 15 分钟就整理一次"
+（配置项 idleCompactAfterMinutes，默认 15）。我们是命令行程序，没有常驻进程
+去数闲置时间，"用户敲了 exit"就是最接近的那个时刻——这段对话到此为止了。
+
+**为什么不能只靠压缩触发**：压缩的线是 190,000 token，而整个项目所有 .py
+加起来才 76,000。正常聊天几乎永远够不着，也就是说记忆几乎永远不会被写。
+这个洞是第 26 讲做完之后才发现的。
+
+Ctrl+C 退出不会整理——那些事实还在流水账里，下次退出时一起整理。
+游标记着进度，不会漏也不会重。
+
 更完整的说明见 docs/设计文档.md。
 """
 import argparse
@@ -52,7 +69,7 @@ import asyncio
 
 from agent.compaction import compact_if_needed, restore_history
 from agent.context import build_system_prompt
-from agent.memory import read_memory
+from agent.memory import dream, read_memory
 from agent.runner import AgentRunner, AgentRunSpec
 from agent.tools import workspace
 from agent.tools.loader import discover_tools
@@ -75,14 +92,35 @@ root = workspace.set_root(".")
 # 加一个新工具 = 在 agent/tools/ 下新建一个 .py 文件，这里不用改。
 TOOLS = discover_tools()
 
-# 系统提示 = templates/ 下的模板（SOUL.md + AGENTS.md）+ 运行时信息 + 长期记忆。
-# 在这里算一次、之后每轮复用——它不变，所以能一直命中模型的提示缓存。
-# 想改 Agent 的性格或规矩，改 templates/ 里的 .md，不用碰代码（改完要重启）。
-#
-# 长期记忆（data/memory/MEMORY.md）也是启动时读一次，改了同样要重启才生效。
-# 现在还没有"会话中途改记忆"的路径，所以够用；等第 27 讲 /dream 能在会话里跑时，
-# 再决定要不要改成每轮重拼。
-SYSTEM_PROMPT = build_system_prompt(str(root), read_memory())
+def current_system_prompt() -> str:
+    """现算一条系统提示：模板 + 运行时 + 当前的长期记忆。
+
+    谁会用它
+        main()：开场时算一次，以及 /dream 整理完记忆之后**重算一次**。
+
+    传入什么 / 返回什么
+        不用传。返回拼好的系统提示（str）。
+
+    为什么不是模块级算一次就完了（第 27 讲改的）
+        第 24 讲时记忆只读不写，启动时读一次足够。现在 /dream 能在会话中途
+        改掉 MEMORY.md——如果还用启动时那份，就会出现**记忆已经更新了，
+        但模型看到的还是旧的**，而且直到重启都是旧的。
+
+        改成函数之后，重算一次就是一句调用。
+
+    为什么不干脆每轮都重算
+        系统提示是提示缓存的前缀，改一个字后面全部失效（见 agent/context.py）。
+        记忆几轮才变一次，每轮重算等于白白丢缓存。**变了才重算**是更好的权衡。
+
+        nanobot 是每次请求都重拼的（AgentContext.build_messages），
+        它那样做是因为要带上会话摘要、当前项目路径等每轮都可能不同的东西；
+        我们的系统提示里没有这类内容。
+
+    例子（要读 templates/ 和 data/，见 tests/test_memory_injection.py）
+        没有记忆时  ->  模板 + 运行时，不含"# 长期记忆"
+        有记忆时    ->  末尾多一段"# 长期记忆"
+    """
+    return build_system_prompt(str(root), read_memory())
 
 
 def parse_args() -> argparse.Namespace:
@@ -228,7 +266,7 @@ async def main() -> None:
     #   [0]  系统提示 —— 只活在内存里，**不会**写进存档（见设计文档 §3）
     #   [1:] 历史 —— 存档里是全文；如果压缩过，restore_history 会把
     #        "前 covered 条"换成一条摘要消息，还原成上次压缩后的样子
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + restore_history(
+    messages = [{"role": "system", "content": current_system_prompt()}] + restore_history(
         session.history, session.summary
     )
 
@@ -237,6 +275,17 @@ async def main() -> None:
         if user_input in ("exit", "quit"):
             break
         if not user_input:              # 直接回车：什么都不做，重新读
+            continue
+
+        # /dream：手动做一次睡前整理。不进 messages，所以不占上下文、不写存档。
+        # 这类以 / 开头的本地命令都该在这里拦掉，别让它们流到模型那边去。
+        if user_input == "/dream":
+            outcome = await dream(provider)
+            print(f"\n  {outcome.note}\n")
+            if outcome.processed:
+                # ★ 记忆变了，开场白要跟着换，否则模型这一轮看到的还是旧记忆。
+                # messages[0] 永远是系统提示（不变量：它只活在内存里，不进存档）。
+                messages[0] = {"role": "system", "content": current_system_prompt()}
             continue
 
         # ── ① 压缩（一轮最多一次，要花钱）──
@@ -279,6 +328,13 @@ async def main() -> None:
             print("\n[转满圈数仍未完成]\n")
         elif result.final_content:
             print(f"\nAI > {result.final_content}\n")
+
+    # ── 退出前：睡前整理 ──
+    # 走到这里说明用户敲了 exit/quit（Ctrl+C 不会走这条路）。
+    # 整理失败不影响退出——记忆是锦上添花，用户想走就该让他走。
+    outcome = await dream(provider)
+    if outcome.processed or not outcome.ok:
+        print(f"  [睡前整理] {outcome.note}")
 
 
 if __name__ == "__main__":
