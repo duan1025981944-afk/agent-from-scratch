@@ -74,11 +74,13 @@ import asyncio
 from agent.compaction import compact_if_needed, restore_history
 from agent.context import build_system_prompt
 from agent.memory import (
+    correct_fact,          # ← 加
     diff_memory,
     dream,
     list_snapshots,
     read_memory,
     restore_snapshot,
+    trace_fact,            # ← 加
 )
 from agent.runner import AgentRunner, AgentRunSpec
 from agent.tools import workspace
@@ -238,7 +240,7 @@ def open_session(requested_key: str | None, model: str) -> manager.Session:
     return session
 
 
-async def run_local_command(cmd: str, provider) -> bool:
+async def run_local_command(cmd: str, provider, session_key: str = "") -> bool:
     """处理 / 开头的本地命令，返回"记忆有没有被改动"。
 
     谁会用它
@@ -310,6 +312,55 @@ async def run_local_command(cmd: str, provider) -> bool:
         ok, note = restore_snapshot()
         print(f"\n  {note}\n")
         return ok
+    
+    if cmd.startswith("/correct"):
+        # 纠正 = 记一条 correction 事实 + 立刻整理。
+        #
+        # 为什么要"立刻"整理，而不是等下次 /dream：
+        # 你敲 /correct 的那一刻，说明你**刚刚发现记忆是错的**。
+        # 让它带着错的内容再活一会儿没有任何好处，而且你很可能转头就忘了
+        # 还有一条纠正挂在流水账上没生效。一次模型调用换一个"说了就算"。
+        正确的说法 = cmd[len("/correct"):].strip()
+        if not 正确的说法:
+            print(
+                "\n  用法：/correct 正确的说法"
+                "\n  最好把错的也一起说出来，模型才知道该删哪条，例如："
+                "\n    /correct 项目的向量库是 Chroma，不是 Pinecone\n"
+            )
+            return False
+
+        编号 = correct_fact(正确的说法, session=session_key)
+        print(f"\n  已记下纠正（流水账第 {编号} 条），正在整理进记忆……")
+
+        outcome = await dream(provider)
+        print(f"  {outcome.note}")
+        if outcome.diff:
+            print("  实际改动：")
+            for line in outcome.diff.splitlines():
+                print(f"    {line}")
+        print()
+        return outcome.processed > 0
+
+    if cmd.startswith("/why"):
+        关键词 = cmd[len("/why"):].strip()
+        if not 关键词:
+            print("\n  用法：/why 关键词        例如：/why Pinecone\n")
+            return False
+
+        命中 = trace_fact(关键词)
+        if not 命中:
+            print(f"\n  流水账里没有含「{关键词}」的事实。")
+            print("  （记忆里的话是合并过的，换个更短的词再试试）\n")
+            return False
+
+        print(f"\n  流水账里 {len(命中)} 条含「{关键词}」，从新到旧：\n")
+        for f in 命中:
+            出处 = f.get("session") or "（没记出处）"
+            print(f"  [{f['cursor']}] {f.get('at', '?')}  [{f.get('tag', '?')}]")
+            print(f"        {f.get('content', '')}")
+            print(f"        出处：{出处}")
+        print(f"\n  想看原文：python main.py --session <出处>\n")
+        return False
 
     print(
         "\n  不认识的命令。可用：/dream  /memory  /memory-log  /memory-undo"
@@ -370,8 +421,8 @@ async def main() -> None:
         # /dream：手动做一次睡前整理。不进 messages，所以不占上下文、不写存档。
         # 这类以 / 开头的本地命令都该在这里拦掉，别让它们流到模型那边去。
         if user_input.startswith("/"):
-            记忆变了 = await run_local_command(user_input, provider)
-            if 记忆变了:
+            memory_change = await run_local_command(user_input, provider, session.key)
+            if memory_change:
                 # ★ 记忆变了，开场白要跟着换，否则模型这一轮看到的还是旧记忆。
                 # messages[0] 永远是系统提示（不变量：它只活在内存里，不进存档）。
                 messages[0] = {"role": "system", "content": current_system_prompt()}

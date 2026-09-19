@@ -842,3 +842,105 @@ def restore_snapshot(
     memory_path.parent.mkdir(parents=True, exist_ok=True)
     memory_path.write_text(源.read_text(encoding="utf-8-sig"), encoding="utf-8")
     return True, f"已回滚到 {源.name}（回滚前那版也存成快照了，可以再退回来）"
+
+# ══════════════════════════════════════════════════════════════
+# 纠正与溯源（第 29 讲）
+# ══════════════════════════════════════════════════════════════
+#
+# 第 28 讲加的快照是**事后补救**：记错了 -> 你发现 -> 整个退回上一版。
+# 但"退回去"是个粗暴的动作：这一版里可能有九条对的、一条错的，
+# 退回去等于把九条对的也一起扔了。
+#
+# 这一讲加两个更细的动作：
+#
+#     纠正   你说一句"不对，是 Chroma"，只推翻错的那一条    -> correct_fact
+#     溯源   记忆里某句话可疑，查它是从哪次对话来的           -> trace_fact
+#
+# 两个动作都不需要新机制，用的全是前面几讲已经有的零件：
+#
+#     纠正 = append_fact(tag="correction") + dream()
+#            [correction] 这个标签第 26 讲就定下了，dream.md 里也早写了
+#            "删掉被它推翻的那条"——一直没人真正用过它而已
+#     溯源 = 流水账每条都带 session 字段（第 25 讲埋的伏笔）
+
+
+def correct_fact(text: str, session: str = "", path: Path | None = None) -> int:
+    """记一条纠正。返回它在流水账里的编号。
+
+    谁会用它
+        main.py 的 /correct 命令。
+
+    传入什么
+        text:    正确的说法。**最好把错的也一起说出来**，例如
+                 "项目的向量库是 Chroma，不是 Pinecone"——
+                 这样模型整理时才知道该删掉哪一条。
+        session: 当前会话 key，记成出处。
+        path:    流水账文件。
+
+    返回什么
+        编号（int）。和 append_fact 一样。
+
+    会抛什么
+        ValueError —— text 去掉空白后是空的（由 append_fact 抛）。
+
+    它和 append_fact 的唯一区别
+        标签写死成 "correction"。就这一点。
+
+        **那为什么还要单独开一个函数**：因为"纠正"是一个有名字的动作，
+        调用方写 correct_fact(...) 比写 append_fact(..., tag="correction")
+        更容易看懂，也不会把标签拼错。这是一层很薄的门面，不是抽象。
+
+    为什么纠正不直接去改 MEMORY.md
+        因为**流水账是账本，只能追加、不能涂改**（不变量 7）。
+        错了就再记一条冲正，让下一次整理去合并——这是会计的做法，
+        也是我们从第 25 讲就定下的规矩。
+
+        直接改总账还有一个坏处：改完之后没人知道为什么改，
+        而记成一条 correction 之后，它和别的事实一样带着时间和出处。
+
+    例子（碰文件系统，见 tests/test_correction.py）
+        correct_fact("向量库是 Chroma，不是 Pinecone")  ->  7
+    """
+    return append_fact(text, session=session, tag="correction", path=path)
+
+
+def trace_fact(keyword: str, path: Path | None = None) -> list[dict[str, Any]]:
+    """在流水账里找出含某个关键词的事实，用来查"这句话是哪来的"。
+
+    谁会用它
+        main.py 的 /why 命令。
+
+    传入什么
+        keyword: 要找的词，比如 "Pinecone"。**不区分大小写**，
+                 因为你多半是从记忆里随手复制一个词过来的。
+        path:    流水账文件。
+
+    返回什么
+        匹配的记录列表，**从新到旧**（最近记的最可能是你要查的那条）。
+        一条都没有就是空列表。
+
+        每条记录带着 cursor / at / tag / content / session 五样，
+        其中 session 就是出处——拿它去 `python main.py --session <key>`
+        就能翻回当初那次对话的原文。
+
+    为什么这件事做得到（第 25 讲埋的伏笔）
+        流水账每条都记了 session。当时写的理由是"第 29 讲要用"，
+        就是现在：**总账上的一句结论，能一路查回产生它的那次对话**。
+
+        nanobot 做不到这一点——它的 Dream 看到的是已经压缩过的摘要，
+        指不回原始会话。我们能做到是因为不变量 1："存档存全文"。
+
+    为什么不去 MEMORY.md 里找
+        总账是**合并过**的，一句话可能来自好几条流水。
+        要查出处只能回到流水账——那里才是一条一条、带着时间和来源的原始记录。
+
+    例子（见 tests/test_correction.py）
+        trace_fact("Pinecone")  ->  [{"cursor": 7, "tag": "correction", ...},
+                                     {"cursor": 5, "tag": "durable", ...}]
+    """
+    词 = keyword.strip().lower()
+    if not 词:
+        return []
+
+    命中 = [f for f in read_facts(path=path) if 词 in f.get("content", "").lower()]
+    return sorted(命中, key=lambda f: f["cursor"], reverse=True)
