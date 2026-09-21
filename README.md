@@ -63,6 +63,13 @@ API key 从环境变量读取，不写进配置文件：
 export DEEPSEEK_API_KEY="sk-..."
 ```
 
+推荐：复制.env.example文件为.env文件，设置自己的api密钥
+```python
+from dotenv import load_dotenv
+# 导入环境配置文件
+load_dotenv("./.env")
+```
+
 **运行**：
 
 ```bash
