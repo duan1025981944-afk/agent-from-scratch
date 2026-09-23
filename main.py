@@ -266,6 +266,8 @@ async def run_local_command(cmd: str, provider, session_key: str = "") -> bool:
         /memory        看当前记忆
         /memory-log    看最近几次整理改了什么
         /memory-undo   退回上一版
+        /correct 正确的说法   记一条纠正，并立刻整理
+        /why 关键词           查一句话的出处和所属会话
 
     例子（要调模型/碰文件，不写成 doctest）
         "/memory-log" 没有快照时  ->  打印"还没有任何快照"，返回 False
@@ -364,6 +366,7 @@ async def run_local_command(cmd: str, provider, session_key: str = "") -> bool:
 
     print(
         "\n  不认识的命令。可用：/dream  /memory  /memory-log  /memory-undo"
+        "  /correct 正确的说法  /why 关键词"
         "\n  （要跟模型说以 / 开头的话，换个说法，比如去掉开头的斜杠）\n"
     )
     return False
@@ -472,7 +475,7 @@ async def main() -> None:
     # ── 退出前：睡前整理 ──
     # 走到这里说明用户敲了 exit/quit（Ctrl+C 不会走这条路）。
     # 整理失败不影响退出——记忆是锦上添花，用户想走就该让他走。
-    outcome = await dream(provider)
+    outcome = await dream(provider) 
     if outcome.processed or not outcome.ok:
         print(f"  [睡前整理] {outcome.note}")
         if outcome.diff:
