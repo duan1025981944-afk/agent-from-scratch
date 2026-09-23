@@ -587,32 +587,32 @@ async def dream(
 
     try:
         reply = await provider.chat([{"role": "user", "content": prompt}])
-        新总账 = (reply.content or "").strip()
+        new_memory = (reply.content or "").strip()
     except Exception as exc:                      # noqa: BLE001 —— 整理失败不该炸掉程序
         return DreamResult(False, 0, cursor, f"整理时调模型失败：{exc}")
 
-    if not 新总账:
+    if not new_memory:
         # 模型返回空。可能是被安全策略拦了、可能是超时截断了。
         # 不管哪种，都不能拿一个空字符串去覆盖总账——那等于把记忆全删了。
         return DreamResult(False, 0, cursor, "模型没有返回内容，记忆未改动。")
 
     # ★ 覆盖之前先拍快照（第 28 讲）。放在这里而不是函数开头：
     # 前面任何一步失败都不会走到这儿，那些情况本来就没改文件，不用存。
-    旧总账 = read_memory(memory_path)
+    old_memory = read_memory(memory_path)
     snapshot_memory(memory_path, snapshot_dir)
 
     # ★ 这两行必须紧挨着：写总账 + 推进游标，要么都做、要么都不做（不变量 8）
     memory_path.parent.mkdir(parents=True, exist_ok=True)
-    memory_path.write_text(新总账 + "\n", encoding="utf-8")
+    memory_path.write_text(new_memory + "\n", encoding="utf-8")
     write_dream_cursor(batch[-1]["cursor"], cursor_path)
 
-    剩下 = len(facts) - len(batch)
+    remaining = len(facts) - len(batch)
     note = f"整理了 {len(batch)} 条事实。"
-    if 剩下:
-        note += f"还剩 {剩下} 条，下次接着整理。"
+    if remaining:
+        note += f"还剩 {remaining} 条，下次接着整理。"
     return DreamResult(
         True, len(batch), batch[-1]["cursor"], note,
-        diff=diff_memory(旧总账, 新总账),        # 程序算的，不是模型自己说的
+        diff=diff_memory(old_memory, new_memory),        # 程序算的，不是模型自己说的
     )
 
 # ══════════════════════════════════════════════════════════════
@@ -677,14 +677,14 @@ def _free_snapshot_path(snapshot_dir: Path) -> Path:
         那个名字已存在   ->  ...-842318.md
     """
     now = datetime.now()
-    秒 = f"{now:%Y%m%d-%H%M%S}"
-    微秒 = now.microsecond
+    stamp = f"{now:%Y%m%d-%H%M%S}"
+    micros = now.microsecond
 
     while True:
-        target = snapshot_dir / f"MEMORY-{秒}-{微秒:06d}.md"
+        target = snapshot_dir / f"MEMORY-{stamp}-{micros:06d}.md"
         if not target.exists():
             return target
-        微秒 += 1
+        micros += 1
 
 
 def snapshot_memory(
@@ -728,8 +728,8 @@ def snapshot_memory(
     target.write_text(memory_path.read_text(encoding="utf-8-sig"), encoding="utf-8")
 
     # 只留最近 KEEP_SNAPSHOTS 份。名字带时间戳，所以按名字排序 = 按时间排序。
-    老的 = list_snapshots(snapshot_dir)[KEEP_SNAPSHOTS:]
-    for path in 老的:
+    stale = list_snapshots(snapshot_dir)[KEEP_SNAPSHOTS:]
+    for path in stale:
         with suppress(OSError):
             path.unlink()
 
@@ -792,9 +792,9 @@ def diff_memory(old: str, new: str) -> str:
         >>> diff_memory("一样的", "一样的")
         ''
     """
-    差异 = difflib.Differ().compare(old.splitlines(), new.splitlines())
-    行 = [d for d in 差异 if d.startswith(("+ ", "- ")) and d[2:].strip()]
-    return "\n".join(行)
+    compared = difflib.Differ().compare(old.splitlines(), new.splitlines())
+    changed = [d for d in compared if d.startswith(("+ ", "- ")) and d[2:].strip()]
+    return "\n".join(changed)
 
 
 def restore_snapshot(
@@ -838,10 +838,10 @@ def restore_snapshot(
     # ★ 先把当前这版存下来，否则回滚本身就变成了不可逆操作
     snapshot_memory(memory_path, snapshot_dir)
 
-    源 = snapshots[which]
+    source = snapshots[which]
     memory_path.parent.mkdir(parents=True, exist_ok=True)
-    memory_path.write_text(源.read_text(encoding="utf-8-sig"), encoding="utf-8")
-    return True, f"已回滚到 {源.name}（回滚前那版也存成快照了，可以再退回来）"
+    memory_path.write_text(source.read_text(encoding="utf-8-sig"), encoding="utf-8")
+    return True, f"已回滚到 {source.name}（回滚前那版也存成快照了，可以再退回来）"
 
 # ══════════════════════════════════════════════════════════════
 # 纠正与溯源（第 29 讲）
@@ -927,8 +927,11 @@ def trace_fact(keyword: str, path: Path | None = None) -> list[dict[str, Any]]:
         流水账每条都记了 session。当时写的理由是"第 29 讲要用"，
         就是现在：**总账上的一句结论，能一路查回产生它的那次对话**。
 
-        nanobot 做不到这一点——它的 Dream 看到的是已经压缩过的摘要，
-        指不回原始会话。我们能做到是因为不变量 1："存档存全文"。
+        和 nanobot 的差异是**粒度和检索方式**，不是"能不能"：它的流水账
+        记的是整段摘要（append_history(summary, session_key=...)），
+        记录里同样带出处，但要查只能让模型自己去 grep 那个文件。
+        我们记的是一条条事实，并且有 /why 这个程序化入口——
+        粒度更细、查询是确定性的，代价是每条事实都要单独写一行。
 
     为什么不去 MEMORY.md 里找
         总账是**合并过**的，一句话可能来自好几条流水。
@@ -938,9 +941,9 @@ def trace_fact(keyword: str, path: Path | None = None) -> list[dict[str, Any]]:
         trace_fact("Pinecone")  ->  [{"cursor": 7, "tag": "correction", ...},
                                      {"cursor": 5, "tag": "durable", ...}]
     """
-    词 = keyword.strip().lower()
-    if not 词:
+    needle = keyword.strip().lower()
+    if not needle:
         return []
 
-    命中 = [f for f in read_facts(path=path) if 词 in f.get("content", "").lower()]
-    return sorted(命中, key=lambda f: f["cursor"], reverse=True)
+    matches = [f for f in read_facts(path=path) if needle in f.get("content", "").lower()]
+    return sorted(matches, key=lambda f: f["cursor"], reverse=True)
