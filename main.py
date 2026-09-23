@@ -89,6 +89,10 @@ from config.loader import load_config
 from providers.factory import create_provider
 from session import manager
 
+from dotenv import load_dotenv
+# 导入环境配置文件
+load_dotenv("./.env")
+
 # ── 模块级初始化：程序一启动就做，做一次 ──
 #
 # 顺序有要求：workspace.set_root() 必须在 discover_tools() 之前。
