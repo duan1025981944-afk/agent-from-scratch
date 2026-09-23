@@ -111,11 +111,15 @@ main.py                  编排层：命令行参数、一轮对话的先后顺�
 │   ├── tokens.py        上下文层：估算一份消息大约多少 token
 │   ├── prompts.py       模板文件的唯一入口
 │   ├── memory.py        记忆层：MEMORY.md（便利贴）的读取 + history.jsonl（流水账）的读写
+│   ├── skills.py        技能层：扫技能目录，读出每个技能的名字和描述（不读正文）
 │   └── tools/
 │       ├── base.py      Tool 基类 + ToolResult
 │       ├── loader.py    基于 pkgutil 的工具自动发现
 │       ├── workspace.py 工作区边界检查
 │       └── *.py         具体工具，一个文件一个
+│
+├── skills/              技能：一个目录一个 SKILL.md（frontmatter 给程序看，正文给模型看）
+│   └── <技能名>/SKILL.md
 │
 ├── session/
 │   ├── manager.py       存储层：会话生命周期（新建 / 恢复 / 列出 / 保存）
@@ -174,7 +178,7 @@ session.save_turn(messages[boundary:])       整轮一次性落盘，先落盘�
 完整的设计说明见 [docs/设计文档.md](docs/设计文档.md)。它分两部分：
 **回顾路线**（隔一段时间没看，从哪里开始一层层读完）和**设计说明**
 （分层规则表、一条消息的旅程、三份 messages 的区别、九条不变量、两道防线与阈值、
-二十五条「为什么放在这里」、与 nanobot 的差异、负对照的测试写法）。
+二十八条「为什么放在这里」、与 nanobot 的差异、负对照的测试写法）。
 
 几条最要紧的：
 
@@ -264,7 +268,7 @@ session.save_turn(messages[boundary:])       整轮一次性落盘，先落盘�
 | 3   | 会话持久化：jsonl 存档、存档与输入分离 | ✅   |
 | 4   | 上下文分层与压缩               | ✅   |
 | 5   | 记忆系统：注入 / 禁区 / 流水账 / 提炼 / Dream / 快照回滚 / 纠正与溯源 | ✅   |
-| 6   | Skills 懒加载             | ⬜   |
+| 6   | Skills 懒加载：格式与发现 ✅，读正文 ⬜，清单进提示 ⬜ | 🔶   |
 | 7   | MCP 桥接                 | ⬜   |
 | 8   | 子 Agent 委派             | ⬜   |
 | 9   | 事件追踪                   | ⬜   |
