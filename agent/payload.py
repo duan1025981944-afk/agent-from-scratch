@@ -10,7 +10,7 @@
 
 车间里有两道工序，都只作用于输出，**绝不碰输入**：
 
-    工序一  截断    单条工具结果超过 4000 字符 -> 剪短，末尾注明省略了多少
+    工序一  截断    单条超过 MAX_TOOL_RESULT_CHARS -> 剪短，末尾注明省略了多少
     工序二  清理    总量超过 CLEAR_TRIGGER     -> 旧的工具结果换成一句占位说明
 
 ──────────────────────────────────────────────────────────────
@@ -61,9 +61,16 @@ from typing import Any
 from agent.tokens import estimate_message_tokens, estimate_tokens
 
 # 单条工具结果的字符上限。不管总量多少，超过就截断。
-# 4000 字符大约等于 1,200 token（代码）到 2,400 token（中文）。
 # 防的是"一次 read_file 读了个大文件就撑爆上下文"。
-MAX_TOOL_RESULT_CHARS = 4000
+#
+# 8000 这个数有出处（第 32 讲从 4000 调上来的）：
+# 按 tokens.py 的系数，中文 1 字符 ≈ 0.6 token，8000 字符 ≈ 4,800 token，
+# 正好贴着 Agent Skills 规范建议的"SKILL.md 正文控制在 5,000 token 以内"。
+# 换句话说：**单条上限刚好容得下一份写得合规的技能正文。**
+#
+# 代价算得出来：清理时保留最近 3 条工具结果，最坏情况从 12,000 字符涨到
+# 24,000 字符（约 14,400 token），占 CONTEXT_BUDGET 的 7.6%。
+MAX_TOOL_RESULT_CHARS = 8000
 
 # ── 两个阈值，不是一个 ──────────────────────────────────────────────
 # 清理工具结果不花钱，所以早一点动手；摘要压缩要多调一次模型，留到最后。
@@ -105,14 +112,14 @@ def _truncate(content: str) -> str:
                  MAX_TOOL_RESULT_CHARS**（本函数不自己判断）。
 
     返回什么
-        剪短后的字符串：前 4000 个字符 + 一行说明。
+        剪短后的字符串：前 MAX_TOOL_RESULT_CHARS 个字符 + 一行说明。
 
     为什么要加那行说明
         直接截断的话，模型会以为文件就到这儿为止，然后基于残缺内容下结论。
         加了说明，它知道后面还有，需要的话可以换个方式再读。
 
     例子
-        >>> out = _truncate("x" * 4500)
+        >>> out = _truncate("x" * 8500)
         >>> out[:10]
         'xxxxxxxxxx'
         >>> out.endswith("（内容过长，已截断，省略 500 个字符）")
@@ -322,12 +329,12 @@ def build_payload(
 
         超长的工具结果会被截断，但**存档一个字没动**：
 
-        >>> msgs = [{"role": "tool", "tool_call_id": "c1", "content": "x" * 5000}]
+        >>> msgs = [{"role": "tool", "tool_call_id": "c1", "content": "x" * 9000}]
         >>> payload = build_payload(msgs)
-        >>> len(payload[0]["content"]) < 5000
+        >>> len(payload[0]["content"]) < 9000
         True
         >>> len(msgs[0]["content"])
-        5000
+        9000
     """
     payload: list[dict[str, Any]] = []
 

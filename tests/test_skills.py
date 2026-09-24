@@ -1,4 +1,4 @@
-"""技能的格式与发现（第 31 讲 · 阶段六第 1 讲）。
+"""技能的格式与发现、按名字读正文（第 31–32 讲）。
 
 每个测试的 docstring 末尾写了"负对照"：把代码改成那样，这个测试必须红。
 做负对照记得先清 __pycache__。
@@ -7,7 +7,14 @@ from pathlib import Path
 
 import pytest
 
-from agent.skills import Skill, discover_skills, load_skill, parse_front_matter
+from agent.skills import (
+    Skill,
+    discover_skills,
+    load_skill,
+    parse_front_matter,
+    read_skill_body,
+    skill_names,
+)
 
 # 一个写得规规矩矩的技能。description 用引号包起来、末尾留三个空格 ——
 # 不加引号的话 YAML 自己就把行尾空格吃了，.strip() 那行等于没被测到。
@@ -25,6 +32,12 @@ description: "星辰科技退换货流程。用户问退货、换货、退款时
 ## 常见误区
 
 - 定制商品不支持无理由退货
+
+---
+
+## 升级路径
+
+- 两次沟通无果转人工
 """
 
 
@@ -198,3 +211,99 @@ def test_parse_front_matter_returns_none_not_a_crash():
     assert parse_front_matter("") is None
     assert parse_front_matter("直接是正文\n\n---\n\n分隔线\n") is None
     assert parse_front_matter("---\n就一句话，不是键值对\n---\n") is None
+
+
+# ─────────────── 第 32 讲：按名字读正文 ───────────────
+
+
+def test_read_skill_body_strips_front_matter_and_adds_a_title(tmp_path):
+    """★ 正文回来了，frontmatter 没跟来，开头补了一行标题。
+
+    清单里已经发过 name 和 description，正文再带一遍就是同一段话进两次上下文。
+    补标题是为了让模型知道这段文字是哪本手册。
+
+    负对照：把 read_skill_body 最后一行的 "# 技能：{skill.name}\\n\\n" 去掉
+            -> 没有标题行，这条红。
+    """
+    写技能(tmp_path, "returns-policy", 正常)
+
+    正文 = read_skill_body("returns-policy", root=tmp_path)
+
+    assert 正文.startswith("# 技能：returns-policy")
+    assert "description:" not in 正文
+    assert "# 退换货流程" in 正文
+
+
+def test_read_skill_body_keeps_the_dividers_inside_the_body(tmp_path):
+    """正文里的 --- 分隔线要原样留着，只切掉开头那段 frontmatter。
+
+    靠的是正则的 ^ 锚（没开 MULTILINE），它只在字符串开头匹配。
+
+    负对照：给 _FRONT_MATTER 加上 re.MULTILINE -> 正文里那条 --- 被当成
+            新一段 frontmatter 的开头切掉，这条红。
+    """
+    写技能(tmp_path, "returns-policy", 正常)
+
+    正文 = read_skill_body("returns-policy", root=tmp_path)
+
+    assert "## 常见误区" in 正文                 # 分隔线后面的内容还在
+    assert 正文.count("---") == 2                # 正文里两条分隔线原样留着
+    assert "## 升级路径" in 正文                 # 两条分隔线之间的内容没被吞掉
+
+
+def test_read_skill_body_is_none_for_unknown_and_for_broken(tmp_path):
+    """名字不存在、技能写坏了，都返回 None。
+
+    坏技能在 discover_skills 那一层就被跳过了，压根不在表里 ——
+    半本坏手册比没有手册更危险。
+
+    负对照：把 read_skill_body 改成直接拼路径读文件
+            （(root or SKILLS_DIR) / name / "SKILL.md"）-> 坏技能被读出来，这条红。
+    """
+    写技能(tmp_path, "returns-policy", 正常)
+    写技能(tmp_path, "broken", "忘了写 frontmatter\n")
+
+    assert read_skill_body("不存在的技能", root=tmp_path) is None
+
+    with pytest.warns(UserWarning):
+        assert read_skill_body("broken", root=tmp_path) is None
+
+
+def test_a_name_is_never_used_to_build_a_path(tmp_path):
+    """★ 名字只用来查表，路径一律从表里取。
+
+    防线是白名单，不是路径检查："../.." 永远不会出现在清单里。
+    这一条和 tests/test_load_skill.py 里那条是同一件事的两个层次（函数 / 工具）。
+
+    负对照：把 read_skill_body 改成直接拼路径 -> 外面那个技能被读出来，这条红。
+    """
+    技能根 = tmp_path / "skills"
+    写技能(技能根, "returns-policy", 正常)
+
+    # "外面"放在技能根目录之外、但仍在 tmp_path 之内 ——
+    # 放到 tmp_path.parent 会和别的测试撞名（那个目录是整次 pytest 共用的）
+    外面 = tmp_path / "outside" / "evil"
+    外面.mkdir(parents=True)
+    (外面 / "SKILL.md").write_text(
+        正常.replace("name: returns-policy", "name: evil") + "\nAPI_KEY=sk-真的密钥\n",
+        encoding="utf-8",
+    )
+
+    for 恶意 in ["../outside/evil", "returns-policy/../../outside/evil"]:
+        assert read_skill_body(恶意, root=技能根) is None
+
+
+def test_skill_names_lists_only_the_usable_ones(tmp_path):
+    """skill_names 是给"名字错了"时反向指路用的，所以只列**能用**的技能。
+
+    负对照：让 skill_names 直接用 iterdir 列目录名，不走 discover_skills
+            -> 坏技能混进可用列表，这条红。
+    """
+    写技能(tmp_path, "shipping", 正常.replace("returns-policy", "shipping"))
+    写技能(tmp_path, "returns-policy", 正常)
+    写技能(tmp_path, "broken", "忘了写 frontmatter\n")
+
+    with pytest.warns(UserWarning):
+        名字 = skill_names(root=tmp_path)
+
+    assert 名字 == ["returns-policy", "shipping"]        # 排过序，且不含 broken

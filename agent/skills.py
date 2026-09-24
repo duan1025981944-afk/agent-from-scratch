@@ -53,6 +53,14 @@ import yaml
 # "supports CRLF" —— \r?\n 就是为 Windows 准备的，少了它在 Windows 上一个都匹配不上。
 _FRONT_MATTER = re.compile(r"^---\s*\r?\n(.*?)\r?\n---\s*\r?\n?", re.DOTALL)
 
+# 技能目录。锚在 __file__（代码位置），不锚在 cwd（启动目录）——
+# 和 agent/prompts.py 的 TEMPLATES_DIR 同款，理由也一样：
+# 技能是**人写的、跟着代码走的**东西，你在哪个目录启动都该带着它。
+#
+# 代价说清楚：技能因此落在工作区**外面**，read_file 的围栏读不到它。
+# 这正是本讲选 load_skill 工具而不是让模型用 read_file 的原因。
+SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
+
 @dataclass(frozen=True)
 class Skill:
     """一个技能的元数据。**不含正文。**
@@ -254,3 +262,63 @@ def discover_skills(root: Path) -> list[Skill]:
         if skill is not None:
             found.append(skill)
     return found
+
+def read_skill_body(name: str, root: Path | None = None) -> str | None:
+    """按名字读一个技能的正文（去掉 frontmatter，带上一行标题）。
+
+    谁会用它
+        agent/tools/load_skill.py —— 模型决定用某个技能时。
+
+    传入什么
+        name: 技能名，也就是目录名。**只认清单里存在的名字。**
+        root: 技能目录。默认 None，函数里才取 SKILLS_DIR ——
+              和 memory.py 的 path 参数一个写法：写成 `root=SKILLS_DIR`
+              的话，默认值在 def 那一刻就定死了，测试换不掉。
+
+    返回什么
+        str  —— "# 技能：<名字>" + 空行 + 正文。
+        None —— 没有这个技能（名字拼错、技能写坏了被跳过、目录不存在）。
+
+    为什么要去掉 frontmatter
+        清单里已经把 name 和 description 发过一遍了，正文再带一份
+        就是同一段话在上下文里出现两次。metadata 那类字段更是只给程序看的。
+
+    为什么要补一行标题
+        不补的话模型收到的是一段没头没尾的文字，不知道这是哪本手册的内容。
+
+    为什么用"查表"而不是直接拼路径（本函数最重要的一点）
+        直接 SKILLS_DIR / name / "SKILL.md" 的话，
+        name 传成 "../../config.json" 就穿越出去了。
+
+        这里改成**先 discover_skills() 列出所有合法技能，再按名字找**：
+        "../.." 永远不会出现在清单里，路径穿越自然不成立。
+        **用白名单查表代替路径检查**，比"先展开再判断"更省事，
+        因为模型压根没有机会把路径递进来。
+
+    例子（碰文件系统，不写成 doctest，见 tests/test_skills.py）
+        read_skill_body("returns-policy")  ->  "# 技能：returns-policy\\n\\n# 退换货流程\\n……"
+        read_skill_body("不存在")           ->  None
+    """
+    skills = {s.name: s for s in discover_skills(root or SKILLS_DIR)}
+    skill = skills.get(name)
+    if skill is None:
+        return None
+
+    Main_text = _FRONT_MATTER.sub("", skill.path.read_text(encoding="utf-8-sig"), count=1)
+    return f"# 技能：{skill.name}\n\n{Main_text.strip()}"
+
+def skill_names(root: Path | None = None) -> list[str]:
+    """列出当前可用的技能名，按名字排序。
+
+    谁会用它
+        agent/tools/load_skill.py：名字不存在时，用它列出"可用的技能有哪些"。
+
+    为什么单独开一个函数，而不是让工具自己 discover_skills(SKILLS_DIR)
+        **技能目录在哪，只有这个文件该知道。** 工具一旦 import 了 SKILLS_DIR，
+        技能层的内部知识就漏到工具层去了（分层表里，工具层不该知道这件事）。
+
+        顺带还解决了一个测试问题：`from agent.skills import SKILLS_DIR`
+        是**按值**绑定的，测试改 skills.SKILLS_DIR 影响不到工具那份拷贝；
+        而这个函数是运行时才读模块全局，替换立刻生效。
+    """
+    return [s.name for s in discover_skills(root or SKILLS_DIR)]
