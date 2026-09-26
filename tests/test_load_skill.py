@@ -150,3 +150,30 @@ def test_description_tells_the_model_when_not_to_use_it():
     assert "不要用于" in tool.description
     assert "read_file" in tool.description               # 指明什么时候该用别的工具
     assert tool.to_schema()["function"]["parameters"]["required"] == ["name"]
+
+
+def test_every_name_on_the_catalog_is_accepted_by_the_tool(技能目录):
+    """★ 清单上写的名字，工具必须全都认 —— 两讲之间的契约。
+
+    清单（第 33 讲）和 load_skill（第 32 讲）是分开写的，很容易各改各的：
+    清单改成显示路径、或者加个前缀，模型照着填就会全部失败。
+    这条测试把它们钉在一起。
+
+    负对照：把 skill_catalog 里的 `- **{s.name}**` 改成显示路径
+            （比如 `- **{s.path}**`）-> 工具不认这些"名字"，这条红。
+    """
+    import re
+
+    from agent.skills import skill_catalog
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")           # 坏技能的警告不是这条要管的
+        catalog = skill_catalog(技能目录 / "skills")
+
+    名字 = re.findall(r"- \*\*(.+?)\*\*", catalog)
+
+    assert 名字, "清单里一个名字都没解析出来"
+    for n in 名字:
+        # 成功时返回的是普通 str（正文），失败才返回带 is_error 的 ToolResult，
+        # 所以这里断言"读到了这个技能的正文"，而不是去看 .is_error
+        assert 调用(name=n).startswith(f"# 技能：{n}"), f"清单上的 {n} 工具却不认"

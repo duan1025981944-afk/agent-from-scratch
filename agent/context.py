@@ -8,6 +8,7 @@
     SOUL.md      我是谁                  几乎不变      <- 缓存永远命中
     AGENTS.md    在这个工作区怎么做事      跟项目走
     运行时        工作区根目录            换目录启动才变
+    技能清单      名字 + 一句话           装/删技能才变（第 33 讲）
     长期记忆      MEMORY.md 正文          每次 Dream 后可能变（第 24 讲）
 
 **稳定的在前，变动的在后。** 这个顺序不是为了好看，是为了省钱，
@@ -72,11 +73,14 @@ from __future__ import annotations
 from agent.prompts import TEMPLATES_DIR, read_template  # noqa: F401
 
 # 按变动频率从低到高排列。**顺序就是拼装顺序，改这个列表就改了系统提示的结构。**
-# 只放 templates/ 下的模板：MEMORY.md **不能**加进来，原因见文件顶部"怎么加一层"。
+# 只放 templates/ 下、**整段原样拼进去**的模板。两个东西不能加进来：
+#   MEMORY.md   不在 templates/ 下，而且缺文件是常态（见文件顶部"怎么加一层"）
+#   SKILLS.md   虽然在 templates/ 下，但它后面要接运行时扫出来的清单，
+#               不是"原样拼进去"那种
 LAYERS = ["SOUL.md", "AGENTS.md"]
 
 
-def build_system_prompt(workspace_root: str, memory: str = "") -> str:
+def build_system_prompt(workspace_root: str, memory: str = "", skills: str = "") -> str:
     """读模板、拼成一条完整的系统提示。
 
     谁会用它
@@ -90,6 +94,13 @@ def build_system_prompt(workspace_root: str, memory: str = "") -> str:
         workspace_root: 工作区的绝对路径（字符串）。
                         它是**运行时信息**：同一份代码，在不同目录启动
                         就会不一样，所以不能写进 .md 文件，只能由代码注入。
+
+        skills:         技能清单正文，由 agent/skills.py 的 skill_catalog() 生成好传进来。
+                        不传或传 ""（一个技能都没有）表示没有技能，**整段不出现**。
+                        和 memory 同一个道理：收**文本**而不是 Path 或 list[Skill]，
+                        这个函数才能保持纯粹 —— 同样的输入永远得到同样的输出、不碰磁盘。
+                        技能存在哪、怎么扫、怎么排版，全是 skills.py 的事。
+
         memory:         长期记忆正文，由 agent/memory.py 的 read_memory() 读好传进来。
                         不传或传 ""（没记过东西）表示没有记忆，**整段不出现**，
                         连标题都不加。
@@ -147,11 +158,27 @@ def build_system_prompt(workspace_root: str, memory: str = "") -> str:
         >>> build_system_prompt("D:/proj", memory="- 用户叫 Himeko").endswith(
         ...     "# 长期记忆\\n\\n- 用户叫 Himeko")
         True
+
+        技能清单同理：没有技能时整段不出现；有技能时排在**记忆前面**
+        （装技能比整理记忆少见得多）：
+
+        >>> "# 技能" in build_system_prompt("D:/proj")
+        False
+        >>> prompt = build_system_prompt("D:/proj", memory="- 用户叫 Himeko",
+        ...                              skills="- **returns-policy** — 退换货流程")
+        >>> prompt.index("# 技能") < prompt.index("# 长期记忆")
+        True
     """
     parts = [read_template(name) for name in LAYERS]
 
     # 运行时信息：换目录启动才会变，放在模板层之后
     parts.append(f"# 运行时\n\n工作区根目录：{workspace_root}")
+
+    # 技能清单：装技能、改 description 才变，比记忆稳定，所以排在记忆**前面**。
+    # 一个技能都没有就整段不加：空清单会让模型以为"有这套机制但一个都没装"，
+    # 它可能去猜名字白调一轮 —— 空清单比没有清单更坏。
+    if skills:
+        parts.append(f"{read_template('SKILLS.md')}\n\n{skills}")
 
     # 长期记忆：变得最勤，放最后。没有就整段不加——
     # 一个空标题既浪费 token，又会让模型以为"记忆是空的"是件值得注意的事

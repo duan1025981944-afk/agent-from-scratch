@@ -71,7 +71,8 @@ class Skill:
     三个字段
         name         技能名，**等于目录名**（frontmatter 里的 name 只用来校验）
         description  frontmatter 里那句话，清单上就显示它
-        path         SKILL.md 的路径，第 2 讲模型要按它去读正文
+        path         SKILL.md 的路径，**只给程序和测试用，不进清单、不给模型**
+                     —— 模型只认 name，靠 load_skill 工具读正文
 
     为什么 frozen=True
         清单数据是只读的：拼完系统提示就不该再改。frozen 让手滑改它直接报错，
@@ -150,15 +151,17 @@ def _skip(skill_dir: Path, reason: str) -> None:
         和 storage/jsonl.py 处理坏行同一个理由：print 会混进 Agent 的对话输出里；
         warnings 走 stderr，而且测试里能用 pytest.warns 断言它真的报了。
 
-    stacklevel=3 是因为中间隔了两层
-        用户想知道的是"谁调的 load_skill"，不是"_skip 这一行"。
-        1 = _skip 自己，2 = load_skill，3 = 真正的调用方。
+    stacklevel=3 指到哪
+        1 = _skip 自己，2 = read_skill_meta，3 = 它的调用方。
+        实际上几乎总是经 discover_skills 进来的，所以警告会指到
+        discover_skills 里那一行（而不是"最初发起扫描的人"）。
+        够用：看到那行就知道是扫技能目录时出的事。
     """
     warnings.warn(f"跳过技能 {skill_dir.name}/：{reason}", stacklevel=3)
     return None
 
 
-def load_skill(skill_dir: Path) -> Skill | None:
+def read_skill_meta(skill_dir: Path) -> Skill | None:
     """读一个技能目录，校验通过返回 Skill，否则返回 None。
 
     谁会用它
@@ -241,8 +244,12 @@ def discover_skills(root: Path) -> list[Skill]:
         nanobot 这里没有排序（它直接用 iterdir 的顺序），这是我们和它的一处差异。
 
     root 不存在怎么办
-        返回空列表，不报错。没写过任何技能是常态 ——
-        和 MEMORY.md 缺文件同一个待遇，对比 templates/ 缺文件是直接抛异常。
+        **警告一次，返回空列表**，不报错。
+
+        不报错：还没写过任何技能是合法状态（对比 templates/ 缺文件直接抛）。
+        但要出声：SKILLS_DIR 是手工锚的启动期常量，锚错了的后果是
+        "模型永远拿不到清单"，而且全程零提示 —— 正是本文件开头反对的
+        那种"悄悄跳过"。和 storage/jsonl.py 处理坏行同一个待遇。
 
     只扫一层
         技能目录里面的 references/、scripts/ 不会被误当成技能，
@@ -252,13 +259,18 @@ def discover_skills(root: Path) -> list[Skill]:
         skills/ 里有 2 个好的、3 个坏的  ->  返回 2 个 Skill + 3 条警告
     """
     if not root.is_dir():
+        warnings.warn(
+            f"技能目录 {root} 不存在，本次不提供任何技能。"
+            f"（如果你确实还没写过技能，忽略这条；如果写过，检查 SKILLS_DIR 锚对没有）",
+            stacklevel=2,
+        )
         return []
 
     found: list[Skill] = []
     for entry in sorted(root.iterdir()):     # 排序在这里，不在返回前
         if not entry.is_dir():               # README.md 之类，直接跳过
             continue
-        skill = load_skill(entry)
+        skill = read_skill_meta(entry)
         if skill is not None:
             found.append(skill)
     return found
@@ -322,3 +334,40 @@ def skill_names(root: Path | None = None) -> list[str]:
         而这个函数是运行时才读模块全局，替换立刻生效。
     """
     return [s.name for s in discover_skills(root or SKILLS_DIR)]
+
+def skill_catalog(root: Path | None = None) -> str:
+    """把技能列成清单文本，一个技能一行。
+
+    谁会用它
+        main.py 的 current_system_prompt()，把结果传给 build_system_prompt()。
+        和记忆同款：**由调用方读好、当文本传进去**，
+        让 build_system_prompt 保持纯函数、不碰磁盘。
+
+    传入什么
+        root: 技能目录。默认 None，函数里才取 SKILLS_DIR（见 memory.py 同款写法）。
+
+    返回什么
+        形如：
+
+            - **returns-policy** — 星辰科技退换货流程。用户问退货、换货、退款时使用。
+            - **shipping** — 查快递物流状态。用户问"到哪了""什么时候送到"时使用。
+
+        **一个技能都没有时返回空字符串 ""**，让调用方整段不加 ——
+        空清单比没有清单更坏：模型会以为"有技能机制但一个都没装"，
+        可能去猜名字白调一轮。这和记忆"没有就整段不出现"是同一条规矩。
+
+    为什么格式定在这里，而不是 context.py
+        context.py 只管"哪一段排在哪、用空行隔开"，它不该知道 Skill 这个类型，
+        也不该知道一个技能该怎么呈现给模型。**那是技能自己的事。**
+
+    为什么用 **加粗** 包名字
+        名字是模型接下来要原样填进 load_skill 的东西，视觉上和描述分开，
+        它更不容易连着描述一起抄进去。nanobot 的清单也是这么排的。
+
+    例子（碰文件系统，不写成 doctest，见 tests/test_skills.py）
+        两个技能  ->  两行
+        没有技能  ->  ""
+    """
+    return "\n".join(
+        f"- **{s.name}** — {s.description}" for s in discover_skills(root or SKILLS_DIR)
+    )
