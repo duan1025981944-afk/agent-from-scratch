@@ -73,6 +73,7 @@ import asyncio
 
 from agent.compaction import compact_if_needed, restore_history
 from agent.context import build_system_prompt
+from agent.skills import skill_catalog 
 from agent.memory import (
     correct_fact,          # ← 加
     diff_memory,
@@ -121,8 +122,9 @@ def current_system_prompt() -> str:
         改成函数之后，重算一次就是一句调用。
 
     为什么不干脆每轮都重算
-        系统提示是提示缓存的前缀，改一个字后面全部失效（见 agent/context.py）。
-        记忆几轮才变一次，每轮重算等于白白丢缓存。**变了才重算**是更好的权衡。
+        重算本身不会丢缓存 —— 记忆没变的话，重算出来的字节和上次完全一样，
+        缓存照样命中。真正的理由只是"少做无谓的活"：每轮都去读一次 MEMORY.md、
+        拼一遍字符串，没有任何收益。。
 
         nanobot 是每次请求都重拼的（AgentContext.build_messages），
         它那样做是因为要带上会话摘要、当前项目路径等每轮都可能不同的东西；
@@ -132,7 +134,7 @@ def current_system_prompt() -> str:
         没有记忆时  ->  模板 + 运行时，不含"# 长期记忆"
         有记忆时    ->  末尾多一段"# 长期记忆"
     """
-    return build_system_prompt(str(root), read_memory())
+    return build_system_prompt(str(root), read_memory(), skill_catalog())
 
 
 def parse_args() -> argparse.Namespace:
