@@ -10,22 +10,8 @@ import pytest
 from agent import skills
 from agent.payload import MAX_TOOL_RESULT_CHARS
 from agent.tools.load_skill import LoadSkillTool
+from skill_samples import 正常
 
-正常 = """---
-name: returns-policy
-description: 星辰科技退换货流程。用户问退货、换货、退款时使用。
----
-
-# 退换货流程
-
-1. 先确认订单状态
-
----
-
-## 常见误区
-
-- 定制商品不支持无理由退货
-"""
 
 
 @pytest.fixture

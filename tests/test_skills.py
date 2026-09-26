@@ -10,44 +10,12 @@ import pytest
 from agent.skills import (
     Skill,
     discover_skills,
-    load_skill,
     parse_front_matter,
     read_skill_body,
+    read_skill_meta,
     skill_names,
 )
-
-# 一个写得规规矩矩的技能。description 用引号包起来、末尾留三个空格 ——
-# 不加引号的话 YAML 自己就把行尾空格吃了，.strip() 那行等于没被测到。
-正常 = """---
-name: returns-policy
-description: "星辰科技退换货流程。用户问退货、换货、退款时使用。   "
----
-
-# 退换货流程
-
-1. 先确认订单状态
-
----
-
-## 常见误区
-
-- 定制商品不支持无理由退货
-
----
-
-## 升级路径
-
-- 两次沟通无果转人工
-"""
-
-
-def 写技能(root: Path, 目录名: str, 正文: str) -> Path:
-    """在 root 下造一个技能目录，返回这个目录。"""
-    d = root / 目录名
-    d.mkdir(parents=True)
-    (d / "SKILL.md").write_text(正文, encoding="utf-8")
-    return d
-
+from skill_samples import 写技能, 正常
 
 def test_a_good_skill_is_loaded(tmp_path):
     """写得对的技能：三个字段都对，描述首尾空白被去掉。
@@ -57,7 +25,7 @@ def test_a_good_skill_is_loaded(tmp_path):
     """
     d = 写技能(tmp_path, "returns-policy", 正常)
 
-    skill = load_skill(d)
+    skill = read_skill_meta(d)
 
     assert isinstance(skill, Skill)
     assert skill.name == "returns-policy"
@@ -75,7 +43,7 @@ def test_body_divider_does_not_truncate_the_front_matter(tmp_path):
     """
     d = 写技能(tmp_path, "returns-policy", 正常)
 
-    skill = load_skill(d)
+    skill = read_skill_meta(d)
 
     assert skill is not None
     assert skill.description.startswith("星辰科技退换货流程")
@@ -96,7 +64,7 @@ def test_directory_without_skill_md_is_skipped_silently(tmp_path, recwarn):
     d = tmp_path / "empty-dir"
     d.mkdir()
 
-    assert load_skill(d) is None
+    assert read_skill_meta(d) is None
     assert len(recwarn) == 0
 
 
@@ -111,7 +79,7 @@ def test_missing_front_matter_warns(tmp_path):
     d = 写技能(tmp_path, "broken", "这个技能忘了写 frontmatter\n")
 
     with pytest.warns(UserWarning, match="frontmatter"):
-        assert load_skill(d) is None
+        assert read_skill_meta(d) is None
 
 
 def test_an_empty_skill_md_also_warns(tmp_path):
@@ -122,7 +90,7 @@ def test_an_empty_skill_md_also_warns(tmp_path):
     d = 写技能(tmp_path, "empty-file", "")
 
     with pytest.warns(UserWarning):
-        assert load_skill(d) is None
+        assert read_skill_meta(d) is None
 
 
 def test_name_must_match_the_directory_name(tmp_path):
@@ -137,7 +105,7 @@ def test_name_must_match_the_directory_name(tmp_path):
     d = 写技能(tmp_path, "mismatch", 正常.replace("name: returns-policy", "name: returns"))
 
     with pytest.warns(UserWarning, match="对不上"):
-        assert load_skill(d) is None
+        assert read_skill_meta(d) is None
 
 
 def test_empty_description_is_rejected(tmp_path):
@@ -151,7 +119,7 @@ def test_empty_description_is_rejected(tmp_path):
     d = 写技能(tmp_path, "no-desc", '---\nname: no-desc\ndescription: "   "\n---\n\n正文\n')
 
     with pytest.warns(UserWarning, match="description"):
-        assert load_skill(d) is None
+        assert read_skill_meta(d) is None
 
 
 def test_discovery_skips_the_broken_and_keeps_the_rest(tmp_path):
@@ -191,15 +159,21 @@ def test_discovery_is_sorted_whatever_the_filesystem_says(tmp_path, monkeypatch)
     assert [s.name for s in discover_skills(tmp_path)] == ["a-skill", "b-skill", "c-skill"]
 
 
-def test_missing_skills_dir_is_normal_not_an_error(tmp_path):
-    """没有 skills/ 目录是常态（还没写过任何技能），不是错误。
+def test_missing_skills_dir_warns_but_does_not_crash(tmp_path):
+    """★ 没有 skills/ 目录：不炸，但要**出声**（第 34 讲改的）。
 
-    和 MEMORY.md 缺文件同一个待遇；对比 templates/ 缺文件是直接抛 FileNotFoundError。
+    原先是静默返回 []。问题在于 SKILLS_DIR 是手工锚的启动期常量 ——
+    锚错了的后果是"模型永远拿不到清单"，而且全程零提示，
+    正好是本项目反对的那种"悄悄跳过"。
 
-    负对照：把 `if not root.is_dir(): return []` 删掉
-            -> iterdir 抛 FileNotFoundError，这条红。
+    但也不该炸：还没写过任何技能是合法状态（对比 templates/ 缺文件直接抛）。
+    所以是"警告 + 空列表"，和 storage/jsonl.py 处理坏行同一个待遇。
+
+    负对照：把 warnings.warn 那句去掉 -> 没有警告，这条红。
+            把 `if not root.is_dir()` 整段删掉 -> iterdir 抛 FileNotFoundError，也红。
     """
-    assert discover_skills(tmp_path / "根本没有这个目录") == []
+    with pytest.warns(UserWarning, match="不存在"):
+        assert discover_skills(tmp_path / "根本没有这个目录") == []
 
 
 def test_parse_front_matter_returns_none_not_a_crash():
