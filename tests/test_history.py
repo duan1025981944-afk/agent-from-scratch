@@ -87,12 +87,12 @@ def test_overlong_content_is_truncated(journal):
 
     负对照：把截断那两行去掉 → 长度是 10000，这条红。
     """
-    from agent.memory import MAX_CONTENT_CHARS
+    from agent.memory import MAX_FACT_CHARS
 
     append_fact("啊" * 10_000, path=journal)
 
     content = read_facts(path=journal)[0]["content"]
-    assert len(content) == MAX_CONTENT_CHARS
+    assert len(content) == MAX_FACT_CHARS
     assert content.endswith("…")
 
 

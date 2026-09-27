@@ -66,8 +66,8 @@
 拿全文 + 便条，现场重造出 [摘要消息] + history[15:]。
 
 好处：压缩是有损的，但原始数据一直在，随时能翻回去、随时能改压缩策略。
-nanobot 也是这么做的（set_summary_checkpoint 的注释写明
-"while preserving the transcript"）。
+nanobot 也是这么做的（session/manager.py 的 commit_summary_checkpoint，
+注释写明 "while preserving the transcript"）。
 """
 from __future__ import annotations
 
@@ -87,6 +87,8 @@ from providers.base import Provider
 # 保留了 12,000 token，压缩几乎白做（实测只降过 13%）。
 #
 # nanobot 的 snip_history 也是按 token 从后往前装的，不是按轮数。
+# （后来 nanobot 在 #5820 "remove local context tail truncation" 里把它删了，
+#   现在的源码里已经找不到这个函数。）
 KEEP_RECENT_RATIO = 0.5
 
 # 摘要消息的开头，用来在一堆消息里认出"哪条是摘要"。

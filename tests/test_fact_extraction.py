@@ -91,12 +91,29 @@ def test_duplicate_facts_are_written_once():
     assert len(parse_facts(text)) == 1
 
 
-def test_unknown_tag_is_not_treated_as_a_fact():
-    """模型自创标签（比如 [important]）时，这一行不算事实行。
+def test_unknown_tag_is_kept_for_downgrading():
+    """模型自创标签（比如 [important]）时，**事实留着**，标签交给 append_fact 降级。
 
-    负对照：把 `tag not in VALID_TAGS` 那个判断去掉 → 多出一条，这条红。
+    以前这里是直接丢掉的，和 append_fact 文档里说的"降级成 durable"自相矛盾，
+    实际行为是"丢"——为一个标签名丢掉一条真事实不划算，所以改成留着。
+
+    负对照：把 parse_facts 里的 `if tag == "skip"` 改回
+    `if tag == "skip" or tag not in VALID_TAGS` → 返回空，这条红。
     """
-    assert parse_facts("- [important] 自创的标签") == []
+    assert parse_facts("- [important] 自创的标签") == [("important", "自创的标签")]
+
+
+def test_unknown_tag_lands_as_durable(journal):
+    """★ 降级发生在落盘那一步：进了流水账，标签是 durable，内容一个字没少。
+
+    负对照：把 append_fact 里的 `tag if tag in VALID_TAGS else "durable"`
+    改成 `tag` → 标签变成 important，这条红。
+    """
+    assert record_facts("- [important] 自创的标签", path=journal) == 1
+
+    记录 = read_facts(path=journal)[0]
+    assert 记录["tag"] == "durable"
+    assert 记录["content"] == "自创的标签"
 
 
 # ── 落盘：record_facts ───────────────────────────────────────

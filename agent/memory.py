@@ -1,4 +1,4 @@
-"""长期记忆：MEMORY.md 在哪、怎么读。对应第 24 讲。
+"""长期记忆：总账、流水账、整理、快照、纠正。对应第 24~29 讲。
 
 ──────────────────────────────────────────────────────────────
 这个文件是什么
@@ -6,10 +6,13 @@
 **语义记忆**的存取入口。MEMORY.md 里放的是"以后换个会话还用得上的事实"，
 启动时由 main.py 读出来，交给 context.py 拼进系统提示。
 
-阶段五分两半：
+这个文件装了阶段五的全部五讲：
 
-    上半（第 24 讲）  MEMORY.md ——"总账"。只读，写归以后的 Dream 管
-    下半（第 25 讲）  history.jsonl ——"流水账"。只能往后加，永不改写
+    第 24 讲  MEMORY.md ——"总账"。启动时读一次，拼进开场白
+    第 25 讲  history.jsonl ——"流水账"。只能往后加，永不改写
+    第 27 讲  dream() ——"睡前整理"。把流水账并进总账，整篇覆盖
+    第 28 讲  快照与 diff ——覆盖前先存一份，改了什么由程序逐行算
+    第 29 讲  纠正与溯源 ——记一条 correction 推翻错的，或查一句话的出处
 
 两者的关系，就是会计的日记账和总账：
 
@@ -30,7 +33,8 @@
 这个文件不是什么
 ──────────────────────────────────────────────────────────────
 - 它**不**拼系统提示——那是 context.py 的事，它只拿到一段文本
-- 它**不**写 MEMORY.md——写入只归 Dream（第 27 讲），主 Agent 碰不到（第 24 讲下半）
+- 它**不**让模型写 MEMORY.md——文件写入只发生在 dream() 和 restore_snapshot()
+  这两个程序自己调的函数里。模型能碰到的是工具，而 data/ 是工具的禁区
 - 它**不**判断"什么事值得记"——那是第 26 讲提炼环节的事，这里只管存
 - 它**不**决定什么时候整理——那是 main.py 的事（退出时、或者你敲 /dream）
 - 它**不**是 templates/。见下面
@@ -49,16 +53,24 @@ templates/ 和 MEMORY.md 看起来都是"拼进系统提示的 .md"，但本质�
     └──────────────┴──────────────────────┴──────────────────────────┘
 
 nanobot 也是这么分的：包里的 templates/memory/MEMORY.md 只是个空模板，
-真正被读写的是工作区里的 memory/MEMORY.md（见 nanobot/utils/helpers.py
-的 sync_workspace_templates，和 agent/memory.py 的 MemoryStore.__init__）。
+真正被读写的是工作区里的 memory/MEMORY.md（见 nanobot/utils/helpers.py 的
+sync_workspace_templates——它只在文件缺失时复制一份过去——和 agent/memory.py
+的 MemoryStore.__init__）。
 
 路径锚在代码位置、放在 data/ 下，和 session/messages.py 的 SESSIONS_DIR 同一个
 基准。data/ 已经在 .gitignore 里。
+
+──────────────────────────────────────────────────────────────
+引用核对记录
+──────────────────────────────────────────────────────────────
+本文件里所有"nanobot 也是这么做的"，2026-09-28 对着 HKUDS/nanobot
+（提交 33dddaaa）逐条核对过，函数名、文件名、引文都能在源码里找到。
+改注释时如果新加了对 nanobot 的引用，请同样去源码里确认一遍再写。
 """
 from __future__ import annotations
 
 import difflib
-import json
+import os
 import re
 from contextlib import suppress
 from dataclasses import dataclass
@@ -68,7 +80,7 @@ from typing import Any
 
 from agent.prompts import read_template
 from providers.base import Provider
-from storage.jsonl import iter_records
+from storage.jsonl import append_record, iter_records
 
 # 记忆文件的唯一位置。测试里用 tmp_path 代替，不会碰到真文件。
 MEMORY_FILE = Path(__file__).resolve().parent.parent / "data" / "memory" / "MEMORY.md"
@@ -118,11 +130,12 @@ def read_memory(path: Path | None = None) -> str:
 #
 # 一行一条，形如：
 #
-#     {"cursor": 1, "at": "2026-09-17 16:20", "content": "用户的项目代号是 蓝鲸-7",
-#      "session": "20260917-161500"}
+#     {"cursor": 1, "at": "2026-09-17 16:20", "tag": "durable",
+#      "content": "用户的项目代号是 蓝鲸-7", "session": "20260917-161500"}
 #
 # cursor   自增编号，从 1 开始。Dream 靠它知道"上次整理到哪了"
 # at       写入时间，只为排查问题用，没有代码读它
+# tag      保质期标签，见 VALID_TAGS
 # content  一条事实的正文
 # session  这条事实是从哪次会话来的。**第 29 讲"从结论追回原始对话"全靠它**
 
@@ -136,9 +149,12 @@ HISTORY_FILE = MEMORY_FILE.parent / "history.jsonl"
 #     ephemeral   几周：当前在做哪个阶段、眼下的待办
 #     correction  纠正：推翻之前记错的说法
 #
-# 标签取自 nanobot 的 dream.md / consolidator_archive.md，它那里还有一个
-# [skip]（审计用、不进记忆）。我们在解析阶段就把 skip 丢掉了，所以存进
-# 流水账的记录里不会出现它。
+# 标签取自 nanobot 的 templates/agent/consolidator_archive.md 和 dream.md，
+# 它那里还有一个 [skip]（dream.md 原话："audit-only content; exclude it from
+# saved memory"）。我们在解析阶段就把 skip 丢掉了，所以存进流水账的记录里不会出现它。
+#
+# 我们这边的定义在 templates/prompts/compaction.md，处理规则在 dream.md，
+# 加上这里的 VALID_TAGS，三处要对得上，改一处就得改三处。
 VALID_TAGS = ("permanent", "durable", "ephemeral", "correction")
 
 # 从摘要正文里认出事实行的规则。宽容一点：
@@ -153,10 +169,27 @@ _FACT_LINE = re.compile(
     r"^\s*(?:[-*•]|\d+[.、)])?\s*[\[【]\s*(\w+)\s*[\]】]\s*(.+?)\s*$"
 )
 
-# 单条正文的上限。超过就截断——这是防意外的保险丝，不是正常路径：
-# 正常的一条事实就一句话。nanobot 也有同样的兜底（_HISTORY_ENTRY_HARD_CAP），
-# 它防的是"模型把整段输入当摘要原样吐回来"这种事故。
-MAX_CONTENT_CHARS = 4_000
+# 单条事实正文的上限，单位是**字符**（Python 的 len，一个汉字算 1，不是字节）。
+# 超过就截断——这是防意外的保险丝，不是正常路径：正常的一条事实就一句话。
+#
+# 为什么改名叫 MAX_FACT_CHARS（原来叫 MAX_CONTENT_CHARS）
+#     agent/tools/write_file.py 里**也有一个 MAX_CONTENT_CHARS**，值是 100_000，
+#     管的是"一次写文件的内容上限"。同名不同义，早晚要看错。名字里带上它管的
+#     东西（fact），就不会撞了。
+#
+# 为什么从 4_000 降到 500
+#     4_000 字的"一条事实"根本不是事实，是模型把整段摘要吐回来了——保险丝的
+#     格子比失火范围还大，等于没装。一句话事实撑死一两百字，500 留足了余量。
+#
+#     nanobot 的同类保险丝是 _HISTORY_ENTRY_HARD_CAP = 64_000（agent/memory.py），
+#     防的也是"模型把整段输入当摘要原样吐回来"。它大得多，是因为它一条记录是
+#     **一整段摘要**，我们一条是**一句事实**——粒度差了两个数量级，上限跟着缩。
+#
+# 项目里几个上限放在一起看（单位都是字符）
+#     agent/memory.py       MAX_FACT_CHARS          500       一条事实
+#     agent/payload.py      MAX_TOOL_RESULT_CHARS   8_000     发给模型的工具结果
+#     agent/tools/write_file.py  MAX_CONTENT_CHARS  100_000   一次写文件
+MAX_FACT_CHARS = 500
 
 
 def append_fact(
@@ -168,12 +201,12 @@ def append_fact(
     """往流水账末尾记一条，返回它的编号。
 
     谁会用它
-        第 26 讲的提炼环节：压缩历史时顺便挑出值得长期记住的事实，一条条记进来。
-        现在还没有调用方，可以先手动调着玩。
+        record_facts()（压缩成功后，把摘要里挑出的事实逐条记进来）、
+        correct_fact()（记一条纠正）。现在这两条路都是通的。
 
     传入什么
         content: 一条事实的正文。建议一句话，例如 "用户的项目代号是 蓝鲸-7"。
-                 超过 MAX_CONTENT_CHARS 会被截断并在末尾加省略号。
+                 超过 MAX_FACT_CHARS 会被截断并在末尾加省略号。
         session: 这条事实来自哪次会话（会话 key）。不传就是空字符串。
         tag:     保质期标签，取值见 VALID_TAGS。不传按 "durable" 算。
                  不认识的标签会被换成 "durable" —— 模型偶尔会自创标签，
@@ -193,7 +226,12 @@ def append_fact(
     它保证什么（不变量）
         **只追加，永不改写。** 和会话存档是同一条规矩：
         记错了就再记一条纠正（第 29 讲的 [correction]），不回头涂改。
-        所以这个函数里只有 open("a")，没有 open("w")。
+        写盘走 storage.jsonl 的 append_record()，那里只有追加模式。
+
+        追加之前会先确认**上一行是完整的一行**（末尾有换行符）。
+        不确认的话，上次写到一半断电留下的半行会把这条新记录焊在它屁股后面，
+        下次读的时候两条一起被当成坏行扔掉——受损范围从"丢半行"变成
+        "丢半行，外加断电后的第一条新记录"。这个坑是情景模拟时真撞出来的。
 
     例子（碰文件系统，所以不写成 doctest，见 tests/test_history.py）
         append_fact("用户的项目代号是 蓝鲸-7")  ->  1
@@ -204,8 +242,8 @@ def append_fact(
     if not text:
         raise ValueError("流水账不收空记录：content 去掉空白之后不能是空的。")
 
-    if len(text) > MAX_CONTENT_CHARS:
-        text = text[: MAX_CONTENT_CHARS - 1] + "…"
+    if len(text) > MAX_FACT_CHARS:
+        text = text[: MAX_FACT_CHARS - 1] + "…"
 
     record = {
         "cursor": _next_cursor(path),
@@ -215,10 +253,7 @@ def append_fact(
         "session": session,
     }
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as f:       # ★ 只追加
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
+    append_record(path, record)      # ★ 只追加，并且先保证上一行是完整的
     return record["cursor"]
 
 
@@ -233,10 +268,17 @@ def read_facts(since: int = 0, path: Path | None = None) -> list[dict[str, Any]]
         path:  流水账文件。
 
     返回什么
-        记录字典组成的列表，按编号从小到大。没有符合的就是空列表。
+        记录字典组成的列表，**按编号从小到大**。没有符合的就是空列表。
 
         坏行会被跳过（见 storage/jsonl.py）。编号不是正整数的记录也跳过——
         外部工具手改过文件时可能出现，让它进来会把 Dream 的游标算歪。
+
+    为什么要显式排序，明明是追加写的
+        正常情况下文件顺序就是编号顺序，排不排一样。但只要顺序乱过一次
+        （手改过文件、断电后编号被重用、以后多进程写），dream() 那边
+        "这批的最后一条 = 这批里编号最大的"就不成立了，游标会推过头，
+        夹在中间那些事实**再也不会被整理，而且一句提示都没有**。
+        一行 sort 换掉一个静默丢数据的可能，很划算。
 
     例子（见 tests/test_history.py）
         read_facts()        ->  全部
@@ -244,6 +286,7 @@ def read_facts(since: int = 0, path: Path | None = None) -> list[dict[str, Any]]
     """
     path = path or HISTORY_FILE
     facts = [r for r in iter_records(path) if _valid_cursor(r) is not None]
+    facts.sort(key=lambda r: r["cursor"])            # 让上面那句"从小到大"是真的
     return [r for r in facts if r["cursor"] > since]
 
 
@@ -264,9 +307,13 @@ def _next_cursor(path: Path) -> int:
     """算出下一条该用几号：现有记录里最大的编号 + 1。
 
     为什么每次都扫全文，不单独存一个计数器文件
-        nanobot 存了（memory/.cursor），因为它有多个进程、多个渠道同时写。
+        nanobot 存了（memory/.cursor），它的注释写着 "Cursor allocation and the
+        append must be atomic: concurrent writers..."——它有多个渠道同时写。
         我们是单进程的命令行程序，扫一遍几百行的成本可以忽略。
         **先写死，等真的慢了再优化**——这是第二次用同一条规矩了。
+
+        代价说清楚：record_facts() 写 N 条就扫 N 遍文件，是 O(N²)。
+        一次压缩挑出来的事实也就几条，无所谓；真要一次灌几百条再说。
 
     为什么取"最大值 + 1"而不是"条数 + 1"
         坏行会被跳过，条数就对不上了。取最大值则不受影响：
@@ -274,6 +321,7 @@ def _next_cursor(path: Path) -> int:
     """
     cursors = [c for r in iter_records(path) if (c := _valid_cursor(r)) is not None]
     return max(cursors, default=0) + 1
+
 
 def parse_facts(text: str) -> list[tuple[str, str]]:
     """从模型写的摘要里，把"值得长期记住的事实"那些行挑出来。
@@ -290,9 +338,14 @@ def parse_facts(text: str) -> list[tuple[str, str]]:
 
         以下行会被丢掉：
             认不出格式的行          摘要的散文部分，本来就不该进流水账
-            [skip] 标签的行         nanobot 用它表示"只供审计，别存"
-            正文是"（无）""无""none" 模型表示"没有值得记的"
+            [skip] 标签的行         nanobot 的 dream.md 用它表示"只供审计，别存"
+            正文是"（无）""无""none""n/a"  模型表示"没有值得记的"
             和前面完全重复的行      同一条事实模型有时会写两遍
+
+        **不认识的标签不丢。** 模型偶尔会自己造一个，比如写成 [永久]、[长期]。
+        为一个标签名丢掉一条真事实不划算，所以原样带出去，由 append_fact
+        统一降级成 durable。这两个函数以前一个说"丢"、一个说"降级"，
+        实际是丢——现在对齐成降级。
 
     为什么解析要宽容
         模型不会每次都严格照格式写。为了一个方括号写成中文【】就丢掉一条
@@ -311,6 +364,8 @@ def parse_facts(text: str) -> list[tuple[str, str]]:
         [('durable', '项目用 Chroma')]
         >>> parse_facts("- [skip] 这条只供审计")           # skip 丢掉
         []
+        >>> parse_facts("- 【永久】用户用中文")             # 自创标签不丢，留给 append_fact 降级
+        [('永久', '用户用中文')]
         >>> parse_facts("- [ephemeral] （无）")            # 模型说"没有"
         []
     """
@@ -323,9 +378,9 @@ def parse_facts(text: str) -> list[tuple[str, str]]:
             continue
 
         tag, content = m.group(1).lower(), m.group(2).strip()
-        if tag == "skip" or tag not in VALID_TAGS:
+        if tag == "skip":                       # 只拦 skip，别的标签交给 append_fact 降级
             continue
-        if content.strip("（）() 　") in ("", "无", "none", "None"):
+        if content.strip("（）() 　").lower() in ("", "无", "暂无", "none", "n/a"):
             continue
         if content in seen:
             continue
@@ -369,6 +424,7 @@ def record_facts(
             print(f"  [记忆写入失败，已跳过这条：{exc}]")
     return written
 
+
 # ══════════════════════════════════════════════════════════════
 # Dream 整理：流水账 -> 总账（第 27 讲）
 # ══════════════════════════════════════════════════════════════
@@ -391,9 +447,49 @@ DREAM_CURSOR_FILE = MEMORY_FILE.parent / ".dream_cursor"
 # 剩下的下次再整理——游标只推进到这一批的最后一条，下次从那儿接着来。
 DREAM_BATCH = 20
 
+# 新记忆至少要保住旧记忆的多少长度。低于这个比例就判定"模型答歪了"，这次不覆盖。
+#
+# 为什么需要这道闸门
+#     整篇覆盖是不可逆的。模型回一句"好的。"，代码以前照样当成功——三个字
+#     换掉整本记忆，游标还往前推。实测过，不是假想。
+#
+# 为什么是比例不是固定字数
+#     记忆会越长越长，固定字数很快就失效。比例跟着一起长。
+#
+# 0.34 是拍的：正常整理会合并、会删过期的，缩掉一小半很正常，缩到只剩三分之一
+# 就很可疑了。误伤了也不要紧——事实还在流水账里，游标没推进，再敲一次 /dream
+# 就好；老这么误伤再考虑给 /dream 加个 --force。
+MIN_KEEP_RATIO = 0.34
+
 # 整理用的提示词。正文在 templates/prompts/dream.md，改文件即生效。
 # 在 import 时就读：文件缺了要在启动时立刻报错，而不是等你敲 /dream 时才炸。
 DREAM_INSTRUCTION = read_template("prompts", "dream.md")
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    """把文本写进 path，**要么整篇写成，要么当没写过**。
+
+    只给这个文件里写 MEMORY.md 和游标用。
+
+    为什么不用 path.write_text
+        write_text 是"先把文件清空，再往里写"。写到一半断电，磁盘上留下的
+        是半篇记忆——而且快照救不了这一版（快照拍的是上一版）。
+        记忆文件被写坏，下次启动整个开场白就带着半截内容。
+
+    怎么做到的
+        先写同目录下的临时文件，再 os.replace 换过去。同一个文件系统上
+        os.replace 是原子操作：要么旧文件，要么新文件，不存在中间状态。
+
+    参照物：nanobot 的 utils/helpers.py 里有同样做法的 _write_text_atomic 和
+    atomic_write_lines（临时文件 + os.replace），用在整体重写 history.jsonl 上。
+    不过它的 MemoryStore.write_memory 写 MEMORY.md 时仍是直接 write_text——
+    它有 git（GitStore）兜底，写坏了能从版本库里取回；我们没有，所以把同一招
+    用到了 MEMORY.md 和游标上。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 @dataclass
@@ -473,8 +569,7 @@ def write_dream_cursor(cursor: int, path: Path | None = None) -> None:
         path:   游标文件。
     """
     path = path or DREAM_CURSOR_FILE
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(str(cursor), encoding="utf-8")
+    _atomic_write(path, str(cursor))
 
 
 def build_dream_prompt(memory: str, facts: list[dict[str, Any]]) -> str:
@@ -535,11 +630,13 @@ async def dream(
                       四个位置。平时都不传，测试里传 tmp_path 下的。
 
     返回什么
-        DreamResult。四种情形：
+        DreamResult。六种情形：
 
             没有新事实        ok=True,  processed=0   什么都没做，也不算失败
             调模型失败        ok=False, processed=0   MEMORY.md 和游标都没动
-            模型返回空/太短    ok=False, processed=0   同上
+            模型返回空        ok=False, processed=0   同上
+            新记忆缩水太多     ok=False, processed=0   同上，见 MIN_KEEP_RATIO
+            整理完内容没变     ok=True,  processed=N   不写盘、不拍快照，只推进游标
             整理成功          ok=True,  processed=N   MEMORY.md 被覆盖，游标推进
 
     它保证什么（不变量 8）
@@ -564,6 +661,10 @@ async def dream(
         风险可控。而"悄悄漏抄"这个风险，正好是第 28 讲要用快照和 diff 解决的——
         **先撞坏再加固**。等真撞上了，再考虑要不要换成受限 Agent。
 
+        整篇覆盖还有一个受限 Agent 没有的风险：模型回一句"好的。"也算"有内容"。
+        受限 Agent 什么都不改就等于什么都没发生，整篇覆盖却会拿这三个字换掉整本
+        记忆。所以多了一道 MIN_KEEP_RATIO 闸门（第 35 讲）。
+
     为什么写 MEMORY.md 不走 write_file 工具
         第 24 讲下半定的禁区：`data/` 里的文件，工具一律不许写。
         Dream 不是工具，它是程序自己的一段代码，直接 write_text 就行——
@@ -583,7 +684,14 @@ async def dream(
         return DreamResult(True, 0, cursor, "流水账里没有新事实，不用整理。")
 
     batch = facts[:DREAM_BATCH]
-    prompt = build_dream_prompt(read_memory(memory_path), batch)
+    # 取这批里**最大**的编号，而不是"最后一条"的编号：万一顺序乱过，
+    # 拿最后一条会把中间几条永久跳过去（read_facts 那边也排了序，这里是第二道）
+    new_cursor = max(f["cursor"] for f in batch)
+
+    # ★ 旧记忆**只读这一次**：喂给模型的那份，和事后算 diff 的基准，必须是同一份。
+    # 以前读了两次，中间还隔着一次 await，理论上能读到两个不同的内容。
+    old_memory = read_memory(memory_path)
+    prompt = build_dream_prompt(old_memory, batch)
 
     try:
         reply = await provider.chat([{"role": "user", "content": prompt}])
@@ -596,24 +704,42 @@ async def dream(
         # 不管哪种，都不能拿一个空字符串去覆盖总账——那等于把记忆全删了。
         return DreamResult(False, 0, cursor, "模型没有返回内容，记忆未改动。")
 
+    # ★ 缩水闸门：回一句"好的。"也是"有内容"，但拿它覆盖整本记忆就是灾难。
+    if old_memory and len(new_memory) < len(old_memory) * MIN_KEEP_RATIO:
+        return DreamResult(
+            False, 0, cursor,
+            f"新记忆只有 {len(new_memory)} 字，旧的有 {len(old_memory)} 字，"
+            f"缩水太多，判定为模型答歪了，这次不覆盖。可以再敲一次 /dream。",
+        )
+
+    remaining = len(facts) - len(batch)
+    tail = f"还剩 {remaining} 条，下次接着整理。" if remaining else ""
+
+    # 内容一个字没变：不写盘，也不拍快照（存一份一模一样的没有意义）。
+    # 但游标要推进——这批事实确实处理过了，只是模型认为不用改记忆。
+    if new_memory == old_memory:
+        write_dream_cursor(new_cursor, cursor_path)
+        return DreamResult(True, len(batch), new_cursor,
+                           f"整理了 {len(batch)} 条事实，记忆内容没有变化。{tail}")
+
     # ★ 覆盖之前先拍快照（第 28 讲）。放在这里而不是函数开头：
     # 前面任何一步失败都不会走到这儿，那些情况本来就没改文件，不用存。
-    old_memory = read_memory(memory_path)
     snapshot_memory(memory_path, snapshot_dir)
 
     # ★ 这两行必须紧挨着：写总账 + 推进游标，要么都做、要么都不做（不变量 8）
-    memory_path.parent.mkdir(parents=True, exist_ok=True)
-    memory_path.write_text(new_memory + "\n", encoding="utf-8")
-    write_dream_cursor(batch[-1]["cursor"], cursor_path)
+    try:
+        _atomic_write(memory_path, new_memory + "\n")
+        write_dream_cursor(new_cursor, cursor_path)
+    except OSError as exc:
+        # 磁盘满了、文件被占用……退出时整理失败不该把退出流程也炸掉。
+        # 万一记忆写成了、游标没写成：下次会把这批再整理一遍（幂等，多花一次调用）。
+        return DreamResult(False, 0, cursor, f"写记忆文件失败：{exc}")
 
-    remaining = len(facts) - len(batch)
-    note = f"整理了 {len(batch)} 条事实。"
-    if remaining:
-        note += f"还剩 {remaining} 条，下次接着整理。"
     return DreamResult(
-        True, len(batch), batch[-1]["cursor"], note,
+        True, len(batch), new_cursor, f"整理了 {len(batch)} 条事实。{tail}",
         diff=diff_memory(old_memory, new_memory),        # 程序算的，不是模型自己说的
     )
+
 
 # ══════════════════════════════════════════════════════════════
 # 快照与回滚（第 28 讲）
@@ -715,7 +841,7 @@ def snapshot_memory(
 
     例子（碰文件系统，见 tests/test_snapshot.py）
         记忆文件不存在  ->  None，什么都不做
-        记忆文件有内容  ->  snapshots/MEMORY-20260918-164700.md
+        记忆文件有内容  ->  snapshots/MEMORY-20260918-164700-842317.md
     """
     memory_path = memory_path or MEMORY_FILE
     snapshot_dir = snapshot_dir or SNAPSHOT_DIR
@@ -747,7 +873,8 @@ def list_snapshots(snapshot_dir: Path | None = None) -> list[Path]:
         Path 列表，从新到旧。目录不存在就是空列表（不是错误）。
 
     例子（见 tests/test_snapshot.py）
-        [snapshots/MEMORY-20260918-164700.md, snapshots/MEMORY-20260918-101200.md]
+        [snapshots/MEMORY-20260918-164700-842317.md,
+         snapshots/MEMORY-20260918-101200-004913.md]
     """
     snapshot_dir = snapshot_dir or SNAPSHOT_DIR
     if not snapshot_dir.exists():
@@ -780,8 +907,12 @@ def diff_memory(old: str, new: str) -> str:
     为什么这件事一定要程序做
         模型漏抄一条时，它自己是不知道的——它以为自己抄全了。
         问它"你改了什么"，它只会复述它**打算**做的事，不是实际发生的事。
-        nanobot 的注释把这点说得很直白：
+        nanobot 的注释把这点说得很直白（utils/gitstore.py 的 summarize_working_tree）：
         "Pure filesystem/git ground truth — never LLM narrative"。
+
+    一个已知的小口子
+        只报有实际内容的增删行，纯空行的增减不报（`d[2:].strip()` 那个判断）。
+        空行变动看着像噪音，但它会改变 markdown 的分节。真要较真时再放开。
 
     例子
         >>> 旧 = "- 从零复刻 nanobot\\n- 提示词外置在 templates/"
@@ -823,13 +954,20 @@ def restore_snapshot(
         敲 /memory-undo 时最常见的需求是"退回上一版"，序号 0 最省事。
         真要指定某一份时，/memory-log 会把序号列出来。
 
+    为什么要专门挡负数
+        Python 的 list[-1] 是"最后一个"，在这里就是**最旧的那份快照**。
+        用户敲 /memory-undo -1 本意多半是"再往前一步"，结果一步退到天荒地老，
+        而且返回的是 (True, ...)，看起来还成功了。宁可报错。
+
     例子（见 tests/test_snapshot.py）
         没有快照        ->  (False, "还没有任何快照……")
-        which=0        ->  (True, "已回滚到 MEMORY-20260918-164700.md")
+        which=0        ->  (True, "已回滚到 MEMORY-20260918-164700-842317.md")
     """
     memory_path = memory_path or MEMORY_FILE
     snapshots = list_snapshots(snapshot_dir)
 
+    if which < 0:
+        return False, "序号要从 0 开始数，0 就是最新的那一份。"
     if not snapshots:
         return False, "还没有任何快照，没法回滚。（快照是整理记忆时自动存的）"
     if which >= len(snapshots):
@@ -842,6 +980,7 @@ def restore_snapshot(
     memory_path.parent.mkdir(parents=True, exist_ok=True)
     memory_path.write_text(source.read_text(encoding="utf-8-sig"), encoding="utf-8")
     return True, f"已回滚到 {source.name}（回滚前那版也存成快照了，可以再退回来）"
+
 
 # ══════════════════════════════════════════════════════════════
 # 纠正与溯源（第 29 讲）

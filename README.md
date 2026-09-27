@@ -111,7 +111,7 @@ main.py                  编排层：命令行参数、一轮对话的先后顺�
 │   ├── context.py       上下文层：系统提示按变动频率分层拼装
 │   ├── tokens.py        上下文层：估算一份消息大约多少 token
 │   ├── prompts.py       模板文件的唯一入口
-│   ├── memory.py        记忆层：MEMORY.md（便利贴）的读取 + history.jsonl（流水账）的读写
+│   ├── memory.py        记忆层：便利贴 MEMORY.md、流水账 history.jsonl、Dream 整理、快照回滚、纠正溯源
 │   ├── skills.py        技能层：扫技能目录，读出每个技能的名字和描述（不读正文）
 │   └── tools/
 │       ├── base.py      Tool 基类 + ToolResult
@@ -127,7 +127,7 @@ main.py                  编排层：命令行参数、一轮对话的先后顺�
 │   ├── manager.py       存储层：会话生命周期（新建 / 恢复 / 列出 / 保存）
 │   └── messages.py      存储层：jsonl 底层读写
 ├── storage/
-│   └── jsonl.py         最底层：逐行读 jsonl、跳过坏行（存档和流水账共用）
+│   └── jsonl.py         最底层：逐行读（跳过坏行）+ 追加写（先补齐上一行），存档和流水账共用
 │
 ├── data/                运行时数据，不进 git
 │   ├── sessions/        聊天存档
@@ -205,7 +205,7 @@ session.save_turn(messages[boundary:])       整轮一次性落盘，先落盘�
 | 会话文件头     | ——                               | jsonl 首行写 `_meta`（模型、工作区、创建时间）  | `--list` 只需读一行；恢复时可检测工作区变更                      |
 
 
-**一处一致、但容易想当然的地方**：压缩**不改写存档**。nanobot 的 `set_summary_checkpoint`
+**一处一致、但容易想当然的地方**：压缩**不改写存档**。nanobot 的 `Session.commit_summary_checkpoint`
 注释写明 *"while preserving the transcript"* —— 它同样保留完整记录，只是移动
 `last_archived` 指针让重放从摘要之后开始。本项目的 `_summary` 便条 + `covered` 指针是同一思路。
 
@@ -269,7 +269,7 @@ session.save_turn(messages[boundary:])       整轮一次性落盘，先落盘�
 | 2   | 工具系统：自动发现、边界检查、错误防御    | ✅   |
 | 3   | 会话持久化：jsonl 存档、存档与输入分离 | ✅   |
 | 4   | 上下文分层与压缩               | ✅   |
-| 5   | 记忆系统：注入 / 禁区 / 流水账 / 提炼 / Dream / 快照回滚 / 纠正与溯源 | ✅   |
+| 5   | 记忆系统：注入 / 禁区 / 流水账 / 提炼 / Dream / 快照回滚 / 纠正与溯源 / 加固（第 35 讲） | ✅   |
 | 6   | Skills 懒加载：格式与发现 ✅，读正文 ✅，清单进提示 ✅，端到端验收 ⬜ | 🔶   |
 | 7   | MCP 桥接                 | ⬜   |
 | 8   | 子 Agent 委派             | ⬜   |
