@@ -48,7 +48,9 @@ load_messages 一个字都不用改。`_summary` 就是这么加进来的。
 ──────────────────────────────────────────────────────────────
 不变量：存档只追加，永不改写
 ──────────────────────────────────────────────────────────────
-本文件所有的写操作都是 open("a")（追加模式），**没有一处是 open("w")**。
+本文件所有的写操作都走 storage/jsonl.py 的 append_record()，那里只有追加模式，
+**没有一处是 open("w")**。它还会在追加前确认上一行是完整的一行——上次写到
+一半断电留下的半行，不能再把下一条新记录也带走。
 
 为什么：磁盘上这份是这段对话的唯一真相。压缩是有损的，截断是有损的，
 一旦改了它，原文就永久没了。有了全文，随时能翻回去、随时能换压缩策略。
@@ -80,10 +82,10 @@ load_messages 一个字都不用改。`_summary` 就是这么加进来的。
 """
 from __future__ import annotations
 
-import json
 from datetime import datetime
 from pathlib import Path
 
+from storage.jsonl import append_record
 from storage.jsonl import iter_records as _iter_records
 from typing import Any
 
@@ -129,7 +131,8 @@ def append_messages(session_key: str, messages: list[dict[str, Any]]) -> None:
         不用手动建 data/sessions/。
 
     两个细节
-        - open("a")：**追加模式**。文件已有内容不会被动，新内容加在末尾。
+        - append_record()：**追加模式**。文件已有内容不会被动，新内容加在末尾；
+          上一行如果缺换行符（断电留下的半行），会先补一个再写。
         - ensure_ascii=False：中文原样写进文件。默认的 True 会把"你好"
           变成 "\\u4f60\\u597d"——能用，但打开文件就没法读了。
 
@@ -143,10 +146,8 @@ def append_messages(session_key: str, messages: list[dict[str, Any]]) -> None:
         文件末尾就多了两行。再调一次，又多两行，前面的不受影响。
         隔离好的可执行版本见 tests/test_session_summary.py。
     """
-    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-    with _path(session_key).open("a", encoding="utf-8") as f:
-        for msg in messages:
-            f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+    for msg in messages:
+        append_record(_path(session_key), msg)
 
 
 def load_messages(session_key: str) -> list[dict[str, Any]]:
@@ -212,9 +213,7 @@ def write_meta(session_key: str, meta: dict[str, Any]) -> None:
         它用的也是追加模式，而 load_meta 只认**第一行**。所以第二次写的
         meta 会被静默忽略。这是已知短板，正常流程里 create() 只调一次。
     """
-    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-    with _path(session_key).open("a", encoding="utf-8") as f:
-        f.write(json.dumps({"_meta": meta}, ensure_ascii=False) + "\n")
+    append_record(_path(session_key), {"_meta": meta})
 
 
 def load_meta(session_key: str) -> dict[str, Any] | None:
@@ -297,8 +296,7 @@ def append_summary(session_key: str, summary: str, covered: int) -> None:
         "covered": covered,
         "at": datetime.now().isoformat(timespec="seconds"),
     }}
-    with _path(session_key).open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    append_record(_path(session_key), record)
 
 
 def load_summary(session_key: str) -> dict[str, Any] | None:
