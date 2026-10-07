@@ -17,7 +17,14 @@
     },
     "agents": {
       "defaults": { "modelPreset": "ds" }
+    },
+    "tools": {
+      "mcpServers": {
+        "xingchen_db": {
+          "command": "python",
+          "args": ["mcp_servers/xingchen_db/server.py"]
+        }
+      }
     }
-    
   }
   

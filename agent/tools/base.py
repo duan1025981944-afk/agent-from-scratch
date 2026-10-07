@@ -176,6 +176,11 @@ class Tool(ABC):
         代价是 ABC 不再强制子类必须填——所以 loader.py 里补了检查，
         谁漏了 name 或 description，启动时就会报错。
 
+    可选的第五样：auto_discover（第 40 讲）
+        默认 True：loader 启动时会空手造一个（attr()），自动登记。
+        构造时必须传参数的工具，把它设成 False，loader 就跳过它，
+        由别处负责造（比如 MCPTool：要等连上 server 才造得出来）。
+
     例子
         >>> class Fake(Tool):
         ...     name = "fake"
@@ -191,6 +196,10 @@ class Tool(ABC):
     name: str = ""
     description: str = ""
     parameters: dict[str, Any] = {}
+
+    # ── 登记方式：loader 能不能空手造我（第 40 讲）──
+    # 构造时必须传参数的工具（比如 MCPTool）设成 False，loader 就跳过它。
+    auto_discover: bool = True
 
     # ── 实现部分：子类必须实现 ──
     @abstractmethod
