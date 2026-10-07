@@ -25,3 +25,7 @@ notes/
 Thumbs.db
 
 *.patch
+
+# ── MCP server 运行时产物（第 39、40 讲） ──
+mcp_servers/xingchen_db/xingchen.db
+mcp_servers/toy/outbox.txt

@@ -35,7 +35,7 @@ loader.py 的活儿就是把这三块**压平**成一个 ResolvedModel——
 主程序不该关心"preset 指向哪个 provider"这种内部结构，
 它只想知道 key、url、model 是什么。
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -101,3 +101,33 @@ class ResolvedModel:
     api_key: str
     base_url: str
     model: str
+
+
+@dataclass
+class MCPServerConfig:
+    """一个 MCP server 怎么启动（第 40 讲）。
+
+    谁会产生它
+        config/loader.py 的 load_mcp_servers()，config.json 里 tools.mcpServers 下面一项变成一个。
+
+    谁会用它
+        agent/mcp_bridge.py 的 connect_mcp_servers()（main.py 启动时调用）：
+        照着它启动 server、连上、造工具。
+
+    字段
+        name:    server 的名字，也就是 mcpServers 里的键。会拼进工具名：mcp_<name>_<菜名>
+        command: 启动命令。config.json 里写 "python" 的，loader 已经换成了
+                 正在跑 Agent 的那个 Python（sys.executable），见 load_mcp_servers()
+        args:    命令参数，比如 ["mcp_servers/xingchen_db/server.py"]
+        env:     额外交给 server 的环境变量。SDK 默认只给 server 一小份白名单（40.1），
+                 server 要用的其他变量（比如某个 API key）写在这里
+
+    例子
+        >>> MCPServerConfig(name="xingchen_db", command="python").args
+        []
+    """
+
+    name: str
+    command: str
+    args: list[str] = field(default_factory=list)
+    env: dict[str, str] = field(default_factory=dict)

@@ -43,13 +43,29 @@ config.example.json 这份不含密钥的模板。
 
 这是"错误信息要带修正建议"这条原则的又一次应用——它**对人也一样适用**，
 不只是对模型。
+
+──────────────────────────────────────────────────────────────
+MCP server 的配置（第 40 讲）
+──────────────────────────────────────────────────────────────
+config.json 里还可以有第四块 tools.mcpServers，格式和 nanobot 一样
+（每一项的写法和 Claude Desktop / Cursor 兼容）：
+
+    "tools": {
+      "mcpServers": {
+        "xingchen_db": {"command": "python", "args": ["mcp_servers/xingchen_db/server.py"]}
+      }
+    }
+
+它由 load_mcp_servers() 单独读，load_config() 不管它：
+模型配置和 MCP 配置是两件事，谁要用谁去拿。
 """
 import json
 import os
 import re
+import sys
 from pathlib import Path
 
-from .schema import ProviderConfig, ResolvedModel
+from .schema import MCPServerConfig, ProviderConfig, ResolvedModel
 
 # 匹配 ${VAR} 形式的占位符。变量名限定为大写字母、数字、下划线，
 # 且必须以字母或下划线开头——这是环境变量的通行写法。
@@ -126,6 +142,19 @@ def _expand_env(value):
     return value
 
 
+def _read_raw(path: str) -> dict:
+    """读 config.json，替换掉 ${VAR}，交回原始字典。load_config 和 load_mcp_servers 共用。
+
+    会抛什么
+        FileNotFoundError  找不到配置文件。消息里给**绝对路径**，方便确认是不是在错误的目录下启动的
+        RuntimeError       用到的环境变量没设置（来自 _expand_env）
+    """
+    config_path = Path(path)
+    if not config_path.exists():
+        raise FileNotFoundError(f"找不到配置文件：{config_path.absolute()}")
+    return _expand_env(json.loads(config_path.read_text(encoding="utf-8")))
+
+
 def load_config(path: str = "config.json") -> ResolvedModel:
     """读配置文件，把三块结构解析成主程序能直接用的形式。
 
@@ -169,12 +198,7 @@ def load_config(path: str = "config.json") -> ResolvedModel:
         provider 里不写 kind 的话，默认 "openai_compat"。
         因为目前只有这一种实现，绝大多数配置都不用写它。
     """
-    config_path = Path(path)
-    if not config_path.exists():
-        raise FileNotFoundError(f"找不到配置文件：{config_path.absolute()}")
-
-    raw = json.loads(config_path.read_text(encoding="utf-8"))
-    raw = _expand_env(raw)
+    raw = _read_raw(path)
 
     # ① 默认用哪个 preset
     preset_name = raw["agents"]["defaults"]["modelPreset"]
@@ -205,3 +229,44 @@ def load_config(path: str = "config.json") -> ResolvedModel:
         base_url=provider.base_url,
         model=preset["model"],
     )
+
+
+def load_mcp_servers(path: str = "config.json") -> list[MCPServerConfig]:
+    """读 config.json 里的 tools.mcpServers，一项变成一个 MCPServerConfig（第 40 讲）。
+
+    谁会用它
+        main.py，启动时调一次，照着结果去连 server。
+
+    返回什么
+        一个列表，顺序和 config.json 里写的一样。
+        没写 tools.mcpServers 就是空列表：不接 MCP，Agent 照样能跑。
+
+    "python" 为什么要换掉
+        我们自己的 server 要 import mcp，而 mcp 装在 Agent 的 .venv 里。
+        command 写 "python" 的话，找到的是哪个 Python，取决于启动 Agent 的终端
+        有没有激活 .venv（SDK 在 Windows 上用 shutil.which 按 PATH 去找）。
+        所以这里把 "python" 换成 sys.executable，也就是正在跑 Agent 的这个 Python。
+        写了完整路径的不动：想让某个 server 用别的 Python，写完整路径就行。
+
+    会抛什么
+        FileNotFoundError / RuntimeError  同 load_config（来自 _read_raw）
+        ValueError                        某一项没写 command。消息里带上 server 的名字
+    """
+    raw = _read_raw(path)
+    servers = raw.get("tools", {}).get("mcpServers", {})
+
+    result = []
+    for name, item in servers.items():
+        if "command" not in item:
+            raise ValueError(
+                f"MCP server '{name}' 没写 command。最少要写成："
+                f'"{name}": {{"command": "python", "args": ["你的 server.py"]}}'
+            )
+        command = sys.executable if item["command"] == "python" else item["command"]
+        result.append(MCPServerConfig(
+            name=name,
+            command=command,
+            args=list(item.get("args", [])),
+            env=dict(item.get("env", {})),
+        ))
+    return result

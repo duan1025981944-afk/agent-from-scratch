@@ -9,6 +9,7 @@
     读配置        config/loader.py
     造 provider   providers/factory.py
     发现工具      agent/tools/loader.py
+    连 MCP server agent/mcp_bridge.py（第 40 讲）
     拼系统提示    agent/context.py
     压缩历史      agent/compaction.py
     转循环        agent/runner.py
@@ -70,6 +71,7 @@ Ctrl+C 退出不会整理——那些事实还在流水账里，下次退出时�
 """
 import argparse
 import asyncio
+from contextlib import AsyncExitStack
 
 from agent.compaction import compact_if_needed, restore_history
 from agent.context import build_system_prompt
@@ -83,10 +85,11 @@ from agent.memory import (
     restore_snapshot,
     trace_fact,            # ← 加
 )
+from agent.mcp_bridge import connect_mcp_servers, merge_tools
 from agent.runner import AgentRunner, AgentRunSpec
 from agent.tools import workspace
 from agent.tools.loader import discover_tools
-from config.loader import load_config
+from config.loader import load_config, load_mcp_servers
 from providers.factory import create_provider
 from session import manager
 
@@ -375,13 +378,40 @@ async def run_local_command(cmd: str, provider, session_key: str = "") -> bool:
 
 
 async def main() -> None:
-    """程序主流程：准备好一切，然后进入"读一句、答一句"的循环。
+    """程序入口：读命令行，连上 MCP server，然后进入对话（第 40 讲拆出来的）。
 
     谁会用它
         文件末尾的 asyncio.run(main())。
 
-    传入什么 / 返回什么
-        都没有。它靠 parse_args() 读命令行，靠 print() 输出。
+    为什么要单独拆出来
+        MCP server 的连接要活到对话结束才关（40.3）：开着它的那个盒子
+        （AsyncExitStack）必须把整个对话包在里面。把对话挪进 chat()，
+        这里只剩"开盒子、连 server、聊天、关盒子"四步，chat() 的内容一行都不用动。
+    """
+    args = parse_args()
+
+    # --list 是个"看一眼就走"的分支，不用连模型，也不用开会话，更不用连 MCP server
+    if args.list:
+        print_session_list()
+        return
+
+    # ★ 第 40 讲：连上的 server 都放进这个盒子；出了 async with，倒着一个个关掉
+    async with AsyncExitStack() as stack:
+        mcp_tools = await connect_mcp_servers(stack, load_mcp_servers())
+        tools = merge_tools(TOOLS, mcp_tools)
+        print(f"[工具] 自带 {len(TOOLS)} 个 + MCP {len(mcp_tools)} 个")
+        await chat(args, tools)
+
+
+async def chat(args: argparse.Namespace, tools: dict) -> None:
+    """对话主流程：准备好一切，然后进入"读一句、答一句"的循环。
+
+    谁会用它
+        main()，在连好 MCP server 之后调一次。
+
+    传入什么
+        args:  命令行参数（要用 args.session）
+        tools: 自带工具 + MCP 工具合成的那张表（main() 里的 merge_tools）
 
     为什么是 async
         因为链路上有两个地方要等网络：provider.chat()（调模型）和
@@ -395,13 +425,6 @@ async def main() -> None:
     流程
         见本文件顶部"一轮对话的完整顺序"。
     """
-    args = parse_args()
-
-    # --list 是个"看一眼就走"的分支，不用连模型，也不用开会话
-    if args.list:
-        print_session_list()
-        return
-
     cfg = load_config()                 # 读 config.json，解析成一个 ResolvedModel
     provider = create_provider(cfg)     # 按 cfg.kind 选实现类并实例化
     runner = AgentRunner()
@@ -458,7 +481,7 @@ async def main() -> None:
             AgentRunSpec(
                 provider=provider,
                 initial_messages=messages,
-                tools=TOOLS,
+                tools=tools,                # 第 40 讲：不再是 TOOLS，而是带上了 MCP 工具的那张表
             )
         )
         messages = result.messages      # 把转完的完整历史收回来

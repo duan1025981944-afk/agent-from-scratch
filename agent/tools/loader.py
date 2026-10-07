@@ -28,7 +28,7 @@
 名字的模块"。没有它就做不到自动发现。
 
 找到模块之后，用 dir(module) 把里面的名字全列出来，逐个判断
-"是不是一个能用的 Tool 子类"——四道筛子见 discover_tools() 的说明。
+"是不是一个能用的 Tool 子类"——五道筛子见 discover_tools() 的说明。
 """
 import importlib
 import pkgutil
@@ -79,7 +79,7 @@ def discover_tools() -> dict[str, Tool]:
         "明明写了工具却调不到"，而且完全没有线索。当场报错并说出
         是哪两个类冲突，五秒钟就能定位。
 
-    四道筛子（对应函数体里的四个 continue）
+    五道筛子（对应函数体里的五个 continue）
         1. not isinstance(attr, type)         不是类（常量、函数、导入的模块）
         2. not issubclass(attr, Tool)         是类但不是工具
         3. attr.__module__ != module.__name__ 是**从别处 import 进来的**
@@ -87,6 +87,9 @@ def discover_tools() -> dict[str, Tool]:
                                                from ...base import Tool，
                                                不筛掉的话 Tool 基类会被反复扫到）
         4. __abstractmethods__ 非空           抽象类，实例化会 TypeError
+        5. not attr.auto_discover             类自己声明了"不能空手造"
+                                              （比如 MCPTool：构造时要传会话和菜单，
+                                               由连 MCP server 的地方负责造。第 40 讲）
 
         第 3 条最容易漏。判断依据是"这个类是在哪个模块里**定义**的"——
         attr.__module__ 记的是定义处，不是导入处。
@@ -123,6 +126,8 @@ def discover_tools() -> dict[str, Tool]:
                 continue                        # 是 import 进来的（含 Tool 基类本身）
             if getattr(attr, "__abstractmethods__", None):
                 continue                        # 抽象类，实例化会 TypeError
+            if not attr.auto_discover:
+                continue                        # 类自己说了"别空手造我"（比如 MCPTool）
 
             tool = attr()
 
