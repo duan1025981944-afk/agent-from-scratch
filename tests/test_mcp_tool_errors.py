@@ -10,6 +10,8 @@ import sys
 import time
 from contextlib import AsyncExitStack
 
+from mcp import ClientSession
+
 import agent.mcp_bridge as bridge
 from agent.mcp_bridge import connect_mcp_servers
 from config.schema import MCPServerConfig
@@ -50,9 +52,21 @@ def fragile_server(tmp_path) -> MCPServerConfig:
 def test_timeout_says_not_sure(tmp_path, monkeypatch):
     """超时：交回一张纸条，说"不确定有没有执行"，而不是让异常冒出去（38.5）。
 
+    只把"点菜"这一步的超时缩成 1 秒，握手、要菜单还是照常的 30 秒。
+    以前是把 bridge.TIMEOUT 整个改成 1，可 TIMEOUT 管着每一条请求，握手也算；
+    握手本身就要 0.6–0.8 秒（沙箱实测：server 得先启动 Python、import mcp，才能回话）。
+    冷启动稍慢一点，就先在握手超时，server 被跳过，测试报 KeyError，
+    测到的根本不是我们想测的"点菜超时"。
+
     负对照：删掉 MCPTool._explain 里 REQUEST_TIMEOUT 那个分支 → 纸条变成"回了一个错误"，没有"不确定"，本测试红。
     """
-    monkeypatch.setattr(bridge, "TIMEOUT", 1)          # 不想真等 30 秒
+    real_call_tool = ClientSession.call_tool
+
+    async def call_tool_waits_1s(self, name, arguments=None, read_timeout_seconds=None, **kwargs):
+        # SDK 的 call_tool 可以单独给这一次请求定超时；这里一律改成 1 秒，不想真等 30 秒
+        return await real_call_tool(self, name, arguments, read_timeout_seconds=1, **kwargs)
+
+    monkeypatch.setattr(ClientSession, "call_tool", call_tool_waits_1s)
 
     async def run():
         async with AsyncExitStack() as stack:
