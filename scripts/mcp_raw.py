@@ -45,10 +45,10 @@ import threading
 from pathlib import Path
 
 # 实验开关。做完一个就改回来，再做下一个。
-SERVER_NAME = "xingchen_db"             # 第 39 讲：改成 "xingchen_db"，连星辰科技数据库 server
+SERVER_NAME = "toy"             # 第 39 讲：改成 "xingchen_db"，连星辰科技数据库 server
 SKIP_HANDSHAKE = False          # 第 36 讲：改成 True，不打招呼，直接要菜单、点菜
-TOOL_NAME = "list_orders"               # 第 36 讲：改成 "mul"，点一道菜单上没有的菜
-ARGUMENTS = {"customer_name": "张三"}   # 第 37 讲：点菜时交给厨房的参数，比如改成 {"a": 2, "b": "3"}
+TOOL_NAME = "add"               # 第 36 讲：改成 "mul"，点一道菜单上没有的菜
+ARGUMENTS = {"a": 2, "b": 3}    # 第 37 讲：点菜时交给厨房的参数，比如改成 {"a": 2, "b": "3"}
 TIMEOUT = 5                     # 第 38 讲：每一条回复最多等几秒
 
 ROOT = Path(__file__).resolve().parent.parent
