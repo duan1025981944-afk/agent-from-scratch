@@ -195,3 +195,18 @@ def test_usage_falls_back_to_openai_field_and_missing_usage():
         usage = None
 
     assert _read_usage(NoUsage()) == Usage()
+
+
+def test_tool_exception_gets_hint_exactly_once():
+    """工具执行时抛异常（这里是参数名写错）：行动建议只能出现一次。
+
+    负对照：runner 的 except Exception 分支里再手动拼一次 TOOL_ERROR_HINT → 出现两次。
+    """
+    result, _ = run_agent([
+        tool_reply("read_file", '{"file": "a.txt"}'),   # 参数名应该是 path，故意写成 file
+        text_reply("done"),
+    ])
+
+    content = tool_messages(result.messages)[0]["content"]
+    assert "抛出异常" in content
+    assert content.count("不要用同样的参数重试") == 1
