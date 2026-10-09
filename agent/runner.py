@@ -333,7 +333,6 @@ class AgentRunner:
                     # 兜底产生的错误信息远不如工具自己写的具体。
                     result = ToolResult.error(
                         f"工具 {call.name} 执行时抛出异常：{type(exc).__name__}: {exc}"
-                        + "\n\n" + TOOL_ERROR_HINT
                     )
 
                 content = str(result)
