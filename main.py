@@ -51,6 +51,9 @@
     为什么 ② 要在 ① 之后：压缩会让 messages 变短，边界必须按压缩后的长度算，
     否则 ⑤ 会从错误的位置开始切，把旧消息重复写进存档。
 
+    ④ 失败了怎么办：模型调用出错（断网、密钥失效……）时不退出程序，
+    把 messages 退回到 ② 记下的边界，跳过 ⑤ ⑥，回到"你 >"。这一轮不存档。
+
 ──────────────────────────────────────────────────────────────
 退出时还有一件事：睡前整理（第 27 讲）
 ──────────────────────────────────────────────────────────────
@@ -75,15 +78,15 @@ from contextlib import AsyncExitStack
 
 from agent.compaction import compact_if_needed, restore_history
 from agent.context import build_system_prompt
-from agent.skills import skill_catalog 
+from agent.skills import skill_catalog
 from agent.memory import (
-    correct_fact,          # ← 加
+    correct_fact,
     diff_memory,
     dream,
     list_snapshots,
     read_memory,
     restore_snapshot,
-    trace_fact,            # ← 加
+    trace_fact,
 )
 from agent.mcp_bridge import connect_mcp_servers, merge_tools
 from agent.runner import AgentRunner, AgentRunSpec
@@ -127,7 +130,7 @@ def current_system_prompt() -> str:
     为什么不干脆每轮都重算
         重算本身不会丢缓存 —— 记忆没变的话，重算出来的字节和上次完全一样，
         缓存照样命中。真正的理由只是"少做无谓的活"：每轮都去读一次 MEMORY.md、
-        拼一遍字符串，没有任何收益。。
+        拼一遍字符串，没有任何收益。
 
         nanobot 是每次请求都重拼的（AgentContext.build_messages），
         它那样做是因为要带上会话摘要、当前项目路径等每轮都可能不同的东西；
@@ -319,7 +322,7 @@ async def run_local_command(cmd: str, provider, session_key: str = "") -> bool:
         ok, note = restore_snapshot()
         print(f"\n  {note}\n")
         return ok
-    
+
     if cmd.startswith("/correct"):
         # 纠正 = 记一条 correction 事实 + 立刻整理。
         #
@@ -477,13 +480,31 @@ async def chat(args: argparse.Namespace, tools: dict) -> None:
         # runner 会一直转到模型不再要求调工具（或转满 max_iterations）。
         # 它保证返回的 messages = 传进去的 + 这一轮新长出来的尾巴，顺序不变。
         # ② 的 boundary 能用，靠的就是这条约定。
-        result = await runner.run(
-            AgentRunSpec(
-                provider=provider,
-                initial_messages=messages,
-                tools=tools,                # 第 40 讲：不再是 TOOLS，而是带上了 MCP 工具的那张表
+        try:
+            result = await runner.run(
+                AgentRunSpec(
+                    provider=provider,
+                    initial_messages=messages,
+                    tools=tools,                # 第 40 讲：不再是 TOOLS，而是带上了 MCP 工具的那张表
+                )
             )
-        )
+        except Exception as exc:
+            # 这一轮失败了（断网、密钥失效、余额不足……），但程序不该跟着退出：
+            # 告诉用户、放弃这一轮、回到"你 >"。
+            #
+            # 接的是 Exception，不是 BaseException：Ctrl+C 的取消信号不在
+            # Exception 这一族里，照样往上走，用户想停就能停（见 runner.py 情况 C）。
+            #
+            # 回滚用 boundary（"这一轮从哪开始"的书签），不用"去掉最后 N 条"：
+            # 数个数依赖"到这里正好加了几条"，以后在 ③ 和 ④ 之间多加一条就悄悄错了；
+            # 书签不管中间加了几条都对。不回滚的话，③ 加进去的那句用户输入会留在
+            # 内存里、却不在存档里，下一轮两边就对不上了。
+            #
+            # 两个已知的局限：失败前已经执行过的工具（比如写了文件）不会被撤销；
+            # 这里只保证不崩，不重试——重试该加在 providers/openai_compat.py 里。
+            messages = messages[:boundary]
+            print(f"\n[这一轮失败，没有存档] {type(exc).__name__}: {exc}\n")
+            continue                    # 跳过 ⑤ ⑥，回到"你 >"
         messages = result.messages      # 把转完的完整历史收回来
 
         # ── ⑤ 落盘（在打印之前）──
@@ -500,7 +521,7 @@ async def chat(args: argparse.Namespace, tools: dict) -> None:
     # ── 退出前：睡前整理 ──
     # 走到这里说明用户敲了 exit/quit（Ctrl+C 不会走这条路）。
     # 整理失败不影响退出——记忆是锦上添花，用户想走就该让他走。
-    outcome = await dream(provider) 
+    outcome = await dream(provider)
     if outcome.processed or not outcome.ok:
         print(f"  [睡前整理] {outcome.note}")
         if outcome.diff:
