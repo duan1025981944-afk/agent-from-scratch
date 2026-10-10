@@ -78,15 +78,15 @@ from contextlib import AsyncExitStack
 
 from agent.compaction import compact_if_needed, restore_history
 from agent.context import build_system_prompt
-from agent.skills import skill_catalog 
+from agent.skills import skill_catalog
 from agent.memory import (
-    correct_fact,          # ← 加
+    correct_fact,
     diff_memory,
     dream,
     list_snapshots,
     read_memory,
     restore_snapshot,
-    trace_fact,            # ← 加
+    trace_fact,
 )
 from agent.mcp_bridge import connect_mcp_servers, merge_tools
 from agent.runner import AgentRunner, AgentRunSpec
@@ -130,7 +130,7 @@ def current_system_prompt() -> str:
     为什么不干脆每轮都重算
         重算本身不会丢缓存 —— 记忆没变的话，重算出来的字节和上次完全一样，
         缓存照样命中。真正的理由只是"少做无谓的活"：每轮都去读一次 MEMORY.md、
-        拼一遍字符串，没有任何收益。。
+        拼一遍字符串，没有任何收益。
 
         nanobot 是每次请求都重拼的（AgentContext.build_messages），
         它那样做是因为要带上会话摘要、当前项目路径等每轮都可能不同的东西；
@@ -322,7 +322,7 @@ async def run_local_command(cmd: str, provider, session_key: str = "") -> bool:
         ok, note = restore_snapshot()
         print(f"\n  {note}\n")
         return ok
-    
+
     if cmd.startswith("/correct"):
         # 纠正 = 记一条 correction 事实 + 立刻整理。
         #
@@ -521,7 +521,7 @@ async def chat(args: argparse.Namespace, tools: dict) -> None:
     # ── 退出前：睡前整理 ──
     # 走到这里说明用户敲了 exit/quit（Ctrl+C 不会走这条路）。
     # 整理失败不影响退出——记忆是锦上添花，用户想走就该让他走。
-    outcome = await dream(provider) 
+    outcome = await dream(provider)
     if outcome.processed or not outcome.ok:
         print(f"  [睡前整理] {outcome.note}")
         if outcome.diff:
