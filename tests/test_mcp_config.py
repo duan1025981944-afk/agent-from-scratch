@@ -61,3 +61,41 @@ def test_missing_command_names_the_server(tmp_path):
     path = write_config(tmp_path, {"tools": {"mcpServers": {"broken": {"args": []}}}})
     with pytest.raises(ValueError, match="broken"):
         load_mcp_servers(path)
+
+
+
+def test_default_config_sits_next_to_the_code(tmp_path, monkeypatch):
+    """不传路径时读的是 CONFIG_FILE（跟着代码走），和在哪个目录启动无关。
+
+    负对照：把默认值改回相对路径 "config.json" → 在别的目录下找不到文件，本测试红。
+    """
+    from config import loader
+
+    home = tmp_path / "agent_home"
+    home.mkdir()
+    write_config(home, {"tools": {"mcpServers": {"t": {"command": "uvx", "args": ["x"]}}}})
+    monkeypatch.setattr(loader, "CONFIG_FILE", home / "config.json")
+
+    elsewhere = tmp_path / "some_project"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)          # 假装我们是在另一个项目的文件夹里启动的
+
+    [server] = load_mcp_servers()         # 不传路径
+    assert server.name == "t"
+
+
+
+def test_relative_script_path_is_anchored_to_config_dir(tmp_path):
+    """args 里指向配置文件旁边某个文件的相对路径，换成完整路径；别的参数原样。
+
+    负对照：把 load_mcp_servers 里的 _anchor 去掉 → args 还是相对路径，本测试红。
+    """
+    script = tmp_path / "servers" / "s.py"
+    script.parent.mkdir()
+    script.write_text("", encoding="utf-8")
+    path = write_config(tmp_path, {"tools": {"mcpServers": {
+        "mine": {"command": "python", "args": ["servers/s.py", "--flag", "name=Asia/Shanghai"]},
+    }}})
+
+    [server] = load_mcp_servers(path)
+    assert server.args == [str(script), "--flag", "name=Asia/Shanghai"]
