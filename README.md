@@ -72,13 +72,16 @@ python main.py --list                 # 列出所有历史会话
 python main.py --session 20260909-165921   # 恢复指定会话
 ```
 
-**在别的项目里用**：先 `cd` 到那个项目的文件夹，再用完整路径启动。
+**在别的项目里用**：先 `cd` 到那个项目的文件夹，再运行项目根目录下的启动脚本 `nb.cmd`（Windows）。
 在哪个文件夹启动，哪个文件夹就是工作区；配置、存档、记忆仍然用 mini-nanobot 自己目录下的那一份。
 
 ```bash
 cd D:\你的项目
-D:\mini-nanobot\.venv\Scripts\python.exe D:\mini-nanobot\main.py
+D:\mini-nanobot\nb                          # 开一个新会话
+D:\mini-nanobot\nb --list                   # 参数和 python main.py 一样
 ```
+
+把 mini-nanobot 的目录加进系统 PATH 之后，只敲 `nb` 就行。`nb.cmd` 用的是项目自己 `.venv` 里的 Python，不需要先激活虚拟环境。
 
 对话中可以用的本地命令（不发给模型、不进存档）：
 
