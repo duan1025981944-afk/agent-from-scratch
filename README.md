@@ -72,6 +72,14 @@ python main.py --list                 # 列出所有历史会话
 python main.py --session 20260909-165921   # 恢复指定会话
 ```
 
+**在别的项目里用**：先 `cd` 到那个项目的文件夹，再用完整路径启动。
+在哪个文件夹启动，哪个文件夹就是工作区；配置、存档、记忆仍然用 mini-nanobot 自己目录下的那一份。
+
+```bash
+cd D:\你的项目
+D:\mini-nanobot\.venv\Scripts\python.exe D:\mini-nanobot\main.py
+```
+
 对话中可以用的本地命令（不发给模型、不进存档）：
 
 ```

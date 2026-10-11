@@ -68,3 +68,14 @@ def test_merge_rejects_name_clash():
     """
     with pytest.raises(ValueError, match="echo"):
         merge_tools({"echo": EchoTool()}, {"echo": EchoTool()})
+
+
+
+def test_log_dir_does_not_depend_on_where_you_start():
+    """server 日志放在 Agent 自己的 data/ 下，不会撒到你干活的那个项目里。
+
+    负对照：把 LOG_DIR 改回 Path("data") / "mcp_logs" → 是相对路径，本测试红。
+    """
+    from agent.mcp_bridge import LOG_DIR
+
+    assert LOG_DIR.is_absolute()

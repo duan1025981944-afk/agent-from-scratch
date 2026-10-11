@@ -38,15 +38,24 @@ resolve() 还会跟随符号链接，所以"工作区里放一个指向外面的
 这招也一起挡掉了。
 
 ──────────────────────────────────────────────────────────────
-围栏里还有一个"禁区"：data/
+还有一个"禁区"：Agent 自己的 data/
 ──────────────────────────────────────────────────────────────
-工作区里有一个目录是 Agent **只能看、不能动**的：
+有一个目录是 Agent **只能看、不能动**的——它自己的 data/（在项目目录下）：
 
     data/sessions/*.jsonl    聊天存档（不变量 1：存档存全文）
     data/memory/MEMORY.md    长期记忆（第 24 讲；只归 Dream 写）
 
 道理很简单：**记账的人不能自己改账本。** 模型答错一次是一次的事，
 它要是能改自己的存档和记忆，错误就会被写进下一次的开场白，反复喂给自己。
+
+禁区是**一个固定的完整路径**，不跟着工作区走（见 NO_WRITE_DIRS）：
+
+    在项目目录里启动      禁区在工作区里面，禁区检查拦
+    在别的项目里启动      禁区在工作区外面，围栏先拦；那个项目自己的 data/ 可以写
+    在项目的上级目录启动  禁区在工作区里面，禁区检查拦
+
+以前写的是"工作区下的 data"，后两种情况都是错的：一个白白挡住别人的目录，
+一个真存档反而没人管。
 
 所以写入类工具走 resolve_for_write()，它在越界检查之后多做一道禁区检查。
 读取类工具仍走 resolve()——让模型能翻自己的旧记录是有用的，风险也小得多。
@@ -157,9 +166,11 @@ def get_root() -> Path:
     return _root
 
 
-# 禁区：这些目录（相对工作区根目录）里的文件，写入类工具一律拒绝。
+# 禁区：这些目录里的文件，写入类工具一律拒绝。放的是**完整路径**——
+# Agent 自己的 data/，锚代码位置（和 session/messages.py 的 SESSIONS_DIR 同一个地方），
+# 不跟着工作区走。
 # 现在只有一项，所以直接写死成元组——等第二项出现再考虑要不要做成配置。
-NO_WRITE_DIRS = ("data",)
+NO_WRITE_DIRS = (Path(__file__).resolve().parent.parent.parent / "data",)
 
 
 class ProtectedPath(Exception):
@@ -201,7 +212,7 @@ def resolve_for_write(path: str) -> Path:
 
     会抛什么
         OutsideWorkspace —— 跑出工作区了（由 resolve() 抛）
-        ProtectedPath    —— 在禁区里（data/ 及其子目录）
+        ProtectedPath    —— 在禁区里（Agent 自己的 data/ 及其子目录）
 
     为什么禁区检查一定要放在 resolve() **之后**
         和文件顶部说的是同一个道理：路径要先展开才看得出真面目。
@@ -211,9 +222,8 @@ def resolve_for_write(path: str) -> Path:
 
         先展开再比对，这些写法一个都跑不掉。
 
-    例子
-        >>> import tempfile
-        >>> root = set_root(tempfile.mkdtemp())
+    例子（把工作区设成项目自己的目录，禁区就在工作区里面）
+        >>> root = set_root(str(NO_WRITE_DIRS[0].parent))
         >>> resolve_for_write("notes.md").name          # 普通位置，放行
         'notes.md'
 
@@ -228,13 +238,11 @@ def resolve_for_write(path: str) -> Path:
         拦住了
     """
     target = resolve(path)              # ① 先过越界检查（它内部已经展开好了）
-    root = get_root()
 
-    for name in NO_WRITE_DIRS:         # ② 再看展开后的路径落在哪
-        protected = root / name
+    for protected in NO_WRITE_DIRS:     # ② 再看展开后的路径落在哪
         if target == protected or target.is_relative_to(protected):
             raise ProtectedPath(
-                f"{path} 在受保护的目录 {name}/ 里，不能写入。"
+                f"{path} 在受保护的目录 {protected.name}/ 里，不能写入。"
                 f"这里存的是聊天存档和长期记忆，只能读、不能改。"
                 f"如果你想记住一件事，直接在回复里告诉用户，由用户决定要不要记。"
             )

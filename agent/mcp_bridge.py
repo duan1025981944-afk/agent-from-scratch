@@ -41,7 +41,8 @@ from config.schema import MCPServerConfig
 # 每个 server 的 stderr 写进 data/mcp_logs/<名字>.log。
 # 不交给终端：Windows 上会丢（40.1 的 K4）；也省得 server 的日志混进对话里。
 # data/ 在 .gitignore 里，日志不会被提交。
-LOG_DIR = Path("data") / "mcp_logs"
+# 锚代码位置，不锚启动目录：在别的项目里启动时，日志不该撒到那个项目里去。
+LOG_DIR = Path(__file__).resolve().parent.parent / "data" / "mcp_logs"
 
 # 每条请求最多等几秒：握手、要菜单、点菜都算（会话级的默认值）。
 # nanobot 每个 server 的默认值也是 30 秒（nanobot/config/schema.py 第 373 行）。

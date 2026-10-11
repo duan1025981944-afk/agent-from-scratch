@@ -142,20 +142,59 @@ def _expand_env(value):
     return value
 
 
-def _read_raw(path: str) -> dict:
+# 配置文件跟着代码走：以这个文件的位置为基准，而不是以"在哪个目录启动"为基准。
+# 和 session/messages.py 里的 SESSIONS_DIR 是同一种写法。
+# 这样在别的项目文件夹里启动（工作区 = 那个文件夹），照样找得到配置。
+CONFIG_FILE = Path(__file__).resolve().parent.parent / "config.json"
+
+
+def _config_path(path: str | Path | None) -> Path:
+    """调用方给了路径就用它；没给就用 CONFIG_FILE。
+
+    为什么默认值是 None，到这里才取 CONFIG_FILE
+        写成 path=CONFIG_FILE 的话，默认值在 def 那一刻就定死了，
+        测试里把 CONFIG_FILE 换成临时文件也不起作用，会读到真的配置。
+    """
+    return Path(path) if path is not None else CONFIG_FILE
+
+
+def _anchor(base: Path, arg: str) -> str:
+    """args 里的一项如果指向配置文件旁边的某个文件，换成完整路径；其余原样返回。
+
+    为什么要换
+        config.json 里写的是 "mcp_servers/xingchen_db/server.py" 这种相对路径。
+        原样交给子进程的话，它相对的是"启动 Agent 的那个目录"——在别的项目里
+        启动就找不到脚本了。按配置文件所在的文件夹解析，在哪启动都一样。
+
+    为什么只换"真有这个文件"的
+        args 里还有 "--flag"、"mcp-server-time" 这类不是路径的东西，不能乱动。
+        server 进程本身的工作目录不改：它仍然跟着工作区走。
+
+    例子
+        >>> base = Path(__file__).resolve().parent       # config/ 目录
+        >>> _anchor(base, "loader.py") == str(base / "loader.py")
+        True
+        >>> _anchor(base, "--local-timezone=Asia/Shanghai")
+        '--local-timezone=Asia/Shanghai'
+    """
+    candidate = base / arg
+    return str(candidate) if candidate.is_file() else arg
+
+
+def _read_raw(path: str | Path | None = None) -> dict:
     """读 config.json，替换掉 ${VAR}，交回原始字典。load_config 和 load_mcp_servers 共用。
 
     会抛什么
         FileNotFoundError  找不到配置文件。消息里给**绝对路径**，方便确认是不是在错误的目录下启动的
         RuntimeError       用到的环境变量没设置（来自 _expand_env）
     """
-    config_path = Path(path)
+    config_path = _config_path(path)
     if not config_path.exists():
         raise FileNotFoundError(f"找不到配置文件：{config_path.absolute()}")
     return _expand_env(json.loads(config_path.read_text(encoding="utf-8")))
 
 
-def load_config(path: str = "config.json") -> ResolvedModel:
+def load_config(path: str | Path | None = None) -> ResolvedModel:
     """读配置文件，把三块结构解析成主程序能直接用的形式。
 
     谁会用它
@@ -163,8 +202,8 @@ def load_config(path: str = "config.json") -> ResolvedModel:
         - scripts/check_tokens.py，对账脚本也用它，这样换模型不用改脚本
 
     传入什么
-        path: 配置文件路径，默认 "config.json"。
-              **是相对当前工作目录的**——所以必须在项目根目录启动程序。
+        path: 配置文件路径。不传就用 CONFIG_FILE（项目目录下的 config.json），
+              **和在哪个目录启动无关**。测试会传一个临时文件的路径进来。
 
     返回什么
         一个 ResolvedModel，四个字段：kind / api_key / base_url / model。
@@ -231,7 +270,7 @@ def load_config(path: str = "config.json") -> ResolvedModel:
     )
 
 
-def load_mcp_servers(path: str = "config.json") -> list[MCPServerConfig]:
+def load_mcp_servers(path: str | Path | None = None) -> list[MCPServerConfig]:
     """读 config.json 里的 tools.mcpServers，一项变成一个 MCPServerConfig（第 40 讲）。
 
     谁会用它
@@ -248,12 +287,17 @@ def load_mcp_servers(path: str = "config.json") -> list[MCPServerConfig]:
         所以这里把 "python" 换成 sys.executable，也就是正在跑 Agent 的这个 Python。
         写了完整路径的不动：想让某个 server 用别的 Python，写完整路径就行。
 
+    args 里的相对路径
+        指向配置文件旁边某个文件的，换成完整路径（见 _anchor）。
+        这样 "mcp_servers/xingchen_db/server.py" 在哪个目录启动都找得到。
+
     会抛什么
         FileNotFoundError / RuntimeError  同 load_config（来自 _read_raw）
         ValueError                        某一项没写 command。消息里带上 server 的名字
     """
     raw = _read_raw(path)
     servers = raw.get("tools", {}).get("mcpServers", {})
+    base = _config_path(path).resolve().parent      # 配置文件所在的文件夹，args 里的相对路径按它解析
 
     result = []
     for name, item in servers.items():
@@ -266,7 +310,7 @@ def load_mcp_servers(path: str = "config.json") -> list[MCPServerConfig]:
         result.append(MCPServerConfig(
             name=name,
             command=command,
-            args=list(item.get("args", [])),
+            args=[_anchor(base, a) for a in item.get("args", [])],
             env=dict(item.get("env", {})),
         ))
     return result
