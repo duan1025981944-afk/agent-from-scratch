@@ -16,7 +16,7 @@
       "sf": { "provider": "siliconflow", "model": "deepseek-ai/DeepSeek-V3" }
     },
     "agents": {
-      "defaults": { "modelPreset": "ds" }
+      "defaults": { "modelPreset": "ds", "maxIterations": 30 }
     },
     "tools": {
       "mcpServers": {

@@ -94,7 +94,7 @@ from agent.mcp_bridge import connect_mcp_servers, merge_tools
 from agent.runner import AgentRunner, AgentRunSpec
 from agent.tools import workspace
 from agent.tools.loader import discover_tools
-from config.loader import load_config, load_mcp_servers
+from config.loader import load_agent_defaults, load_config, load_mcp_servers
 from providers.factory import create_provider
 from session import manager
 
@@ -433,6 +433,7 @@ async def chat(args: argparse.Namespace, tools: dict) -> None:
     """
     cfg = load_config()                 # 读 config.json，解析成一个 ResolvedModel
     provider = create_provider(cfg)     # 按 cfg.kind 选实现类并实例化
+    settings = load_agent_defaults()    # 一轮最多转几圈
     runner = AgentRunner()
 
     session = open_session(args.session, cfg.model)
@@ -489,6 +490,7 @@ async def chat(args: argparse.Namespace, tools: dict) -> None:
                     provider=provider,
                     initial_messages=messages,
                     tools=tools,                # 第 40 讲：不再是 TOOLS，而是带上了 MCP 工具的那张表
+                    max_iterations=settings.max_iterations,
                 )
             )
         except Exception as exc:
@@ -517,7 +519,7 @@ async def chat(args: argparse.Namespace, tools: dict) -> None:
 
         # ── ⑥ 展示 ──
         if result.stop_reason == "max_iterations":
-            print("\n[转满圈数仍未完成]\n")
+            print(f"\n[转满 {settings.max_iterations} 圈仍未完成。这一轮已经存档，说一句“继续”可以接着做]\n")
         elif result.final_content:
             print(f"\nAI > {result.final_content}\n")
 

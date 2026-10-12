@@ -52,6 +52,8 @@ python -m pip install -r requirements.txt
 copy config.example.json config.json
 ```
 
+一轮对话最多调几次模型由 `agents.defaults.maxIterations` 控制（不写默认 30）。转满了会提示，这一轮已经存档，说一句"继续"就能接着做。
+
 API key 从环境变量读取，不写进配置文件：
 
 ```powershell
