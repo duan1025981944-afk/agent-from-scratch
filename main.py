@@ -257,6 +257,7 @@ async def run_local_command(cmd: str, provider, session_key: str = "") -> bool:
     传入什么
         cmd:      用户敲的整行，形如 "/dream"、"/memory-undo"。
         provider: /dream 要用它调模型。
+        session_key: 当前会话 key，/correct 用它把纠正记成出自哪个会话。
 
     返回什么
         bool —— 记忆文件变了没有。变了的话调用方要重拼系统提示。
