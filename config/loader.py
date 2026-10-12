@@ -65,7 +65,7 @@ import re
 import sys
 from pathlib import Path
 
-from .schema import MCPServerConfig, ProviderConfig, ResolvedModel
+from .schema import AgentDefaults, MCPServerConfig, ProviderConfig, ResolvedModel
 
 # 匹配 ${VAR} 形式的占位符。变量名限定为大写字母、数字、下划线，
 # 且必须以字母或下划线开头——这是环境变量的通行写法。
@@ -268,6 +268,42 @@ def load_config(path: str | Path | None = None) -> ResolvedModel:
         base_url=provider.base_url,
         model=preset["model"],
     )
+
+# 一轮对话最多转几圈（调几次模型），配置里没写时用这个数。
+DEFAULT_MAX_ITERATIONS = 30
+
+
+def load_agent_defaults(path: str | Path | None = None) -> AgentDefaults:
+    """读 config.json 里 agents.defaults 的运行设置。目前只有一项：一轮最多转几圈。
+
+    谁会用它
+        main.py，启动时调一次，把结果填进 AgentRunSpec.max_iterations。
+
+    返回什么
+        AgentDefaults(max_iterations=...)。
+        配置里没写 maxIterations 就用 DEFAULT_MAX_ITERATIONS——老的 config.json 不用改也能跑。
+
+    为什么默认 30，而 AgentRunSpec 自己的默认值还是 10
+        10 是 runner 那张订单的默认值，不填就是它；改它会牵动一批测试。
+        30 是**这个程序**的默认值：实测模型改一行说明就用了 8 圈
+        （找位置、分段读、查用法、再改），稍复杂的任务要十几二十圈。
+        上限是防失控的保险，不是目标，所以留足余量。
+
+    会抛什么
+        FileNotFoundError / RuntimeError  同 load_config（来自 _read_raw）
+        ValueError  maxIterations 不是大于 0 的整数（0、负数、字符串、小数、true）。
+                    启动期的配置错误，当场报出来，并说出是哪一项
+    """
+    raw = _read_raw(path)
+    defaults = raw.get("agents", {}).get("defaults", {})
+
+    value = defaults.get("maxIterations", DEFAULT_MAX_ITERATIONS)
+    # bool 也算 int（True == 1），要单独挡掉：写成 true 多半是写错了
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(
+            f"配置里的 agents.defaults.maxIterations 必须是大于 0 的整数，现在是 {value!r}。"
+        )
+    return AgentDefaults(max_iterations=value)
 
 
 def load_mcp_servers(path: str | Path | None = None) -> list[MCPServerConfig]:

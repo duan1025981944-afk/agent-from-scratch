@@ -102,6 +102,13 @@ class ResolvedModel:
     base_url: str
     model: str
 
+@dataclass
+class AgentDefaults:
+    """agents.defaults 里和"用哪个模型"无关的设置。目前只有一项。"""
+
+    max_iterations: int
+
+
 
 @dataclass
 class MCPServerConfig:

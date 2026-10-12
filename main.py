@@ -94,7 +94,7 @@ from agent.mcp_bridge import connect_mcp_servers, merge_tools
 from agent.runner import AgentRunner, AgentRunSpec
 from agent.tools import workspace
 from agent.tools.loader import discover_tools
-from config.loader import load_config, load_mcp_servers
+from config.loader import load_agent_defaults, load_config, load_mcp_servers
 from providers.factory import create_provider
 from session import manager
 
@@ -433,6 +433,7 @@ async def chat(args: argparse.Namespace, tools: dict) -> None:
     """
     cfg = load_config()                 # 读 config.json，解析成一个 ResolvedModel
     provider = create_provider(cfg)     # 按 cfg.kind 选实现类并实例化
+    settings = load_agent_defaults()    # 一轮最多转几圈
     runner = AgentRunner()
 
     session = open_session(args.session, cfg.model)
@@ -489,6 +490,7 @@ async def chat(args: argparse.Namespace, tools: dict) -> None:
                     provider=provider,
                     initial_messages=messages,
                     tools=tools,                # 第 40 讲：不再是 TOOLS，而是带上了 MCP 工具的那张表
+                    max_iterations=settings.max_iterations,
                 )
             )
         except Exception as exc:
@@ -517,7 +519,7 @@ async def chat(args: argparse.Namespace, tools: dict) -> None:
 
         # ── ⑥ 展示 ──
         if result.stop_reason == "max_iterations":
-            print("\n[转满圈数仍未完成]\n")
+            print(f"\n[转满 {settings.max_iterations} 圈仍未完成。这一轮已经存档，说一句“继续”可以接着做]\n")
         elif result.final_content:
             print(f"\nAI > {result.final_content}\n")
 
@@ -534,4 +536,19 @@ async def chat(args: argparse.Namespace, tools: dict) -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except* (KeyboardInterrupt, asyncio.CancelledError, EOFError):
+        # 用户按了 Ctrl+C：说一声就走，不要甩一大段 traceback。
+        #
+        # 为什么是 except* 而不是 except：连着 MCP server 时，中断会被它们收尾用的
+        # 任务组一层层包进"异常组"（实测两个 server 包了四层）。普通的 except
+        # 看不到组里面的东西；except* 不管包了几层都认，组里别的错误照常往上抛。
+        #
+        # 为什么有 EOFError：实测在 Windows 控制台里，停在 input() 上按 Ctrl+C，
+        # 抛出来的是 EOFError（"输入结束了"），不是 KeyboardInterrupt——
+        # asyncio 接管了 Ctrl+C，input() 只知道自己什么都没读到。
+        # 另外两种是模型调用或工具跑到一半时按 Ctrl+C 会遇到的。
+        #
+        # 这样退出不做睡前整理（和以前一样）：流水账里的事实留到下次退出时再整理。
+        print("\n[已中断，退出]")
