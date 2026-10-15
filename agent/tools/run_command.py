@@ -47,6 +47,14 @@ Windows 上的两个坑
    nanobot 的 ExecTool._kill_process_tree 也是这两招。
 
 ──────────────────────────────────────────────────────────────
+还有一个不分系统的坑：输出的先后顺序
+──────────────────────────────────────────────────────────────
+标准错误并进了标准输出那根管子，但**并进去不等于顺序不乱**。输出接在管子上时，
+Python 会把标准输出先攒在缓冲区里，攒够了或程序结束才送出；标准错误却写一句送一句。
+所以"先 print、后报错"的程序，模型收到的是报错在前（补课时实测撞到的）。
+给子进程设 PYTHONUNBUFFERED=1，让 Python 不攒。别的程序（git 等）怎么攒由它们自己定，管不到。
+
+──────────────────────────────────────────────────────────────
 退出码不是 0，算不算出错
 ──────────────────────────────────────────────────────────────
 **不算。** 测试没通过、git 报告有冲突，退出码都不是 0，但命令本身好好地跑完了，
@@ -136,8 +144,8 @@ class RunCommandTool(Tool):
                 cwd=workspace.get_root(),                  # 在工作区根目录里跑
                 stdin=asyncio.subprocess.DEVNULL,          # 不给输入：要等人输入的命令立刻失败，而不是卡住
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,          # 错误输出并进标准输出，先后顺序不乱
-                env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+                stderr=asyncio.subprocess.STDOUT,          # 错误输出并进标准输出（Python 子进程的先后顺序靠下一行保住）
+                env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"},
                 start_new_session=not IS_WINDOWS,          # 其他系统：自成一个进程组，超时好整组杀
             )
         except OSError as exc:
