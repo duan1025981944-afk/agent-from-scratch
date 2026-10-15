@@ -71,6 +71,7 @@ def _walk(top: Path) -> list[Path]:
 
 class SearchTextTool(Tool):
     name = "search_text"
+    read_only = True 
     description = (
         "在文件内容里搜索一段文字，返回它出现的每个位置，一行一处：路径:行号: 那一行的内容。\n"
         "适用于：找某个函数、变量、报错信息写在哪个文件的哪一行。\n"

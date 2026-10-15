@@ -54,6 +54,7 @@ class EchoTool(Tool):
     """
 
     name = "echo"
+    read_only = True
     description = "把传入的文本原样返回。用于测试工具链路是否连通。"
     parameters = {
         "type": "object",
