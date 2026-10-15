@@ -180,3 +180,16 @@ def test_run_command_needs_confirmation():
     负对照：把 run_command.py 里的 read_only 改成 True → 这条红。
     """
     assert RunCommandTool.read_only is False
+
+
+def test_python_output_keeps_its_order(sandbox):
+    """★ 子进程先往标准输出写、再往标准错误写，交给模型时也得是这个顺序。
+
+    输出接在管子上时，Python 会把标准输出先攒在缓冲区里，标准错误却写一句送一句。
+    不处理的话，报错会跑到前面去（补课时实测：模型收到的是"后"在"先"前面）。
+
+    负对照：把 env 里的 PYTHONUNBUFFERED 去掉 → "后"跑到"先"前面，这条红。
+    """
+    result = run(f'{PY} -c "import sys; print(\'先\'); print(\'后\', file=sys.stderr)"')
+
+    assert result.index("先") < result.index("后")
