@@ -181,6 +181,18 @@ class Tool(ABC):
         构造时必须传参数的工具，把它设成 False，loader 就跳过它，
         由别处负责造（比如 MCPTool：要等连上 server 才造得出来）。
 
+    可选的第六样：read_only（改造 5）
+        这个工具会不会改动什么。默认 False，也就是"会改"：
+        runner 执行前会先问用户同不同意。只读的工具（读文件、列目录、搜文字）
+        要**自己**声明 read_only = True，才能免掉这一问。
+
+        为什么默认是"会改"
+            新写一个工具忘了声明时，两种默认值的后果不一样：
+                默认 False   忘了标的只读工具，每次多问一句        烦，但安全
+                默认 True    忘了标的写入工具，悄悄就执行了        省事，但危险
+            宁可多问。MCP server 的工具也走这个默认值：别人写的工具，先当它会改东西。
+            nanobot 的 Tool.read_only 默认也是 False。
+
     例子
         >>> class Fake(Tool):
         ...     name = "fake"
@@ -200,6 +212,10 @@ class Tool(ABC):
     # ── 登记方式：loader 能不能空手造我（第 40 讲）──
     # 构造时必须传参数的工具（比如 MCPTool）设成 False，loader 就跳过它。
     auto_discover: bool = True
+
+    # ── 有没有副作用（改造 5）──
+    # False = 会改动东西，runner 执行前要问用户。只读的工具自己改成 True。
+    read_only: bool = False
 
     # ── 实现部分：子类必须实现 ──
     @abstractmethod

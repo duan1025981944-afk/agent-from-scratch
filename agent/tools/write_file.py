@@ -60,15 +60,13 @@ class WriteFileTool(Tool):
         parameters   两个必填参数：path 和 content
         read_only    False —— 显式声明这个工具有副作用
 
-    read_only 这个属性现在有人用吗
-        **没有。** 它是给将来准备的：
+    read_only 这个属性谁在用
+        agent/runner.py：read_only=False 的工具，执行前先问用户（改造 5）。
+        以后做并发执行时也会用到：只读工具可以并发，有副作用的必须串行
+        （nanobot 用 concurrency_safe 做这件事）。
 
-            - 用户确认机制：只对 read_only=False 的工具弹确认
-            - 并发执行：只读工具可以并发，有副作用的必须串行
-              （nanobot 用 concurrency_safe 做这件事）
-
-        现在写上它，是因为"这个工具有没有副作用"是**工具自己最清楚**的事，
-        应该由它自己声明，而不是将来在别处维护一张名单。
+        它写在工具自己身上，是因为"这个工具有没有副作用"是**工具自己最清楚**的事，
+        应该由它自己声明，而不是在别处维护一张名单。
 
     例子
         >>> tool = WriteFileTool()

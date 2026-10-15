@@ -72,6 +72,7 @@ class ListDirTool(Tool):
     """
 
     name = "list_dir"
+    read_only = True 
 
     description = (
         "列出一个目录下的文件和子目录。\n"

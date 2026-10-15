@@ -51,6 +51,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from agent.payload import (
@@ -72,6 +73,15 @@ from providers.base import Provider
 # 单独写建议，统一附一句通用的。nanobot 里也是同样的做法
 # （它的原文是 "[Analyze the error above and try a different approach.]"）。
 TOOL_ERROR_HINT = "提示：检查参数是否正确，或换一种方式完成任务。不要用同样的参数重试。"
+
+# 用户不同意执行时，回给模型的话（改造 5）。
+#
+# 为什么不用 ToolResult.error：工具没坏，参数也没错，是人不同意。
+# 套上 TOOL_ERROR_HINT 的"检查参数是否正确"会把模型往错误的方向引。
+DENIED_TEXT = (
+    "用户拒绝了这次操作，它没有被执行。"
+    "不要换个写法重试同一件事；如果不确定用户想要什么，直接用文字问用户。"
+)
 
 
 def _with_hint(text: str) -> str:
@@ -116,6 +126,15 @@ class AgentRunSpec:
         tools:            {工具名: 工具实例}，通常直接传 discover_tools() 的结果。
                           **不传就是空字典**，那模型只能用文字回答。
 
+        confirm:          动手前问谁同意（改造 5）。一个函数，收 (工具名, 参数)，
+                          返回 True（同意）或 False（不同意）。
+                          只对 read_only=False 的工具调用。
+                          **不传就是 None = 不问**：测试和以后的自动评估都这么用。
+
+                          runner 只知道"有个函数能回答同不同意"，不知道它是在终端里
+                          问你、在网页上弹个框，还是自动评估里直接放行——
+                          循环层不碰产品层。main.py 传的是在终端里问你的 ask_permission。
+
     为什么要专门定义一个类，而不是给 run() 加一堆参数
         参数只会越加越多（nanobot 的对应结构有 26 个字段）。做成一张订单之后，
         加字段不用改 run() 的签名，调用方也不用记参数顺序。
@@ -132,6 +151,7 @@ class AgentRunSpec:
     provider: Provider
     max_iterations: int = 10
     tools: dict[str, Tool] = field(default_factory=dict)
+    confirm: Callable[[str, dict], bool] | None = None
 
 
 @dataclass
@@ -313,6 +333,21 @@ class AgentRunner:
                     continue
 
                 # 情况 C：正常执行。
+                #
+                # 会改动东西的工具，先问一声；不同意就不执行，把"用户拒绝了"当结果回给模型
+                # （改造 5）。只读的不问：读个文件也要按一次 y 的话，人很快就会看都不看
+                # 直接按，这一问也就没意义了。
+                #
+                # 拒绝了也要回一条 tool 消息：模型的每个工具调用都必须有一条对应的结果，
+                # 缺了的话，下一次请求会被接口直接拒掉。
+                if spec.confirm and not tool.read_only and not spec.confirm(call.name, call.arguments):
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": DENIED_TEXT,
+                    })
+                    continue
+
                 try:
                     result = await tool.execute(**call.arguments)
                 except asyncio.CancelledError:

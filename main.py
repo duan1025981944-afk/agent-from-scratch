@@ -45,6 +45,7 @@
     ② boundary = len(messages)   记下写盘边界 —— 必须在 ① 之后！
     ③ append 用户输入
     ④ runner.run()               转循环：调模型 → 执行工具 → 再调 → 直到给出答复
+                                 会改动东西的工具，执行前先在终端里问你（ask_permission）
     ⑤ save_turn(messages[②:])    只把这一轮新长出来的落盘
     ⑥ print                      先落盘再打印，崩了不至于丢数据
 
@@ -248,6 +249,40 @@ def open_session(requested_key: str | None, model: str) -> manager.Session:
     session = manager.create(model, str(root))
     print(f"[新会话 {session.key}]\n")
     return session
+
+
+def ask_permission(name: str, arguments: dict) -> bool:
+    """会改动东西的工具执行之前，在终端里问你一句（改造 5）。
+
+    谁会用它
+        agent/runner.py。chat() 把它作为 confirm 传进 AgentRunSpec，
+        runner 在执行 read_only=False 的工具之前调它。
+
+    传入什么
+        name:      工具名，如 "run_command"。
+        arguments: 模型给的参数。这里不用再打印：runner 在调它之前已经把
+                   "→ 工具名(参数)" 那一行打出来了，你就是看着那一行做决定的。
+
+    返回什么
+        只有输入 y 或 yes（不分大小写）才是 True。直接回车、n、乱敲，都是 False。
+        **默认拒绝**：手一滑多按了个回车，最坏的结果是"没执行"，不是"误执行"。
+
+    按 Ctrl+C 会怎样（2026-10-15 在 Windows 控制台里实测）
+        input() 抛出 EOFError（和停在"你 >"上按 Ctrl+C 一样，见文件末尾），
+        这里当成拒绝。紧接着 asyncio 发出的取消信号会在 runner 下一次 await 时
+        冒出来，整个程序打印"[已中断，退出]"后退出，这一轮不存档。
+        也就是说：确认时按 Ctrl+C = 不执行，并且退出。
+
+    例子（要读键盘，见 tests/test_confirm.py）
+        输入 "y"   -> True
+        直接回车   -> False
+    """
+    try:
+        answer = input(f"      允许执行 {name} 吗？输入 y 允许，直接回车拒绝 > ")
+    except EOFError:
+        print()
+        return False
+    return answer.strip().lower() in ("y", "yes")
 
 
 async def run_local_command(cmd: str, provider, session_key: str = "") -> bool:
@@ -491,6 +526,7 @@ async def chat(args: argparse.Namespace, tools: dict) -> None:
                     initial_messages=messages,
                     tools=tools,                # 第 40 讲：不再是 TOOLS，而是带上了 MCP 工具的那张表
                     max_iterations=settings.max_iterations,
+                    confirm=ask_permission,     # 改造 5：会改动东西的工具，执行前先问你
                 )
             )
         except Exception as exc:

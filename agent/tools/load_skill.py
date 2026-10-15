@@ -61,6 +61,7 @@ class LoadSkillTool(Tool):
     """
 
     name = "load_skill"
+    read_only = True 
 
     description = (
         "读取一个技能的完整说明书。系统提示的「技能」一节列出了所有可用技能的名字和用途；"

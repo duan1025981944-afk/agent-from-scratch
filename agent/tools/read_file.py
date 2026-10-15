@@ -138,6 +138,7 @@ class ReadFileTool(Tool):
     """
 
     name = "read_file"
+    read_only = True 
 
     description = (
         "读取一个文本文件，返回文件里的原文。\n"
