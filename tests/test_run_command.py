@@ -90,7 +90,7 @@ HELPER = (
     "from agent.tools import workspace\n"
     "from agent.tools.run_command import RunCommandTool\n"
     "workspace.set_root(sys.argv[1])\n"
-    "print(asyncio.run(RunCommandTool().execute(sys.argv[2], timeout=5)))\n"
+    "print(asyncio.run(RunCommandTool().execute(sys.argv[2], timeout=20)))\n"
 )
 
 
@@ -100,16 +100,21 @@ def test_a_command_waiting_for_input_fails_fast(sandbox):
     子进程不另给输入的话，会接上 nb 自己的输入——也就是你的终端，它会一直等你敲字。
     测试里没人敲字，所以这样模拟：在另一个 Python 进程里调用 run_command，
     给那个进程接一根我们**永远不写**的管道当输入。
-    timeout=5 是保险：负对照时命令会卡住，5 秒后被杀，测试不会挂死。
+    timeout=20 是保险：负对照时命令会卡住，20 秒后被杀，测试不会挂死。
 
-    负对照：把 stdin=asyncio.subprocess.DEVNULL 去掉 → 命令接上那根管道，卡满 5 秒，这条红。
+    **不计时。** 以前还断言过"4 秒内结束"，电脑一忙（比如评估自检时同时起好几个 Python）
+    就会超过 4 秒，正确的代码也被判红——这叫不稳定的测试（flaky test）。
+    其实不需要计时：卡住和没卡住，看输出就分得清——没卡住会读到 EOFError，
+    卡住的话 20 秒后被杀，输出里是"超过 20 秒还没结束"。
+
+    负对照：把 stdin=asyncio.subprocess.DEVNULL 去掉 → 命令接上那根管道，卡满 20 秒后被杀，
+    输出里没有 EOFError，这条红。
     """
     read_end, write_end = os.pipe()                  # write_end 一直不关：读的那头永远等不到"结束"
-    started = time.monotonic()
     try:
         done = subprocess.run(
             [sys.executable, "-c", HELPER, str(sandbox), f'{PY} -c "input()"'],
-            stdin=read_end, capture_output=True, encoding="utf-8", timeout=30,
+            stdin=read_end, capture_output=True, encoding="utf-8", timeout=60,
             cwd=Path(__file__).resolve().parent.parent,          # 项目目录：那边才 import 得到 agent
             env={**os.environ, "PYTHONIOENCODING": "utf-8"},
         )
@@ -118,7 +123,6 @@ def test_a_command_waiting_for_input_fails_fast(sandbox):
         os.close(write_end)
 
     assert "EOFError" in done.stdout                 # 读到的是"输入结束"，而不是一直等
-    assert time.monotonic() - started < 4
 
 
 def test_timeout_kills_the_whole_process_tree(sandbox):
