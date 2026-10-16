@@ -51,6 +51,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -82,6 +83,32 @@ DENIED_TEXT = (
     "用户拒绝了这次操作，它没有被执行。"
     "不要换个写法重试同一件事；如果不确定用户想要什么，直接用文字问用户。"
 )
+
+
+def _emit(spec: "AgentRunSpec", event: dict) -> None:
+    """把一条事件交给订单里的 on_event（改造 6）。没人收就什么都不做。
+
+    和 confirm 一样，runner 只管"交出去"，不管交给谁、存不存。
+    """
+    if spec.on_event:
+        spec.on_event(event)
+
+
+def _tool_event(round_no: int, name: str, status: str, content: str, seconds: float = 0.0) -> dict:
+    """拼一条工具事件。status 的五种取值见 session/events.py 开头。
+
+    例子
+        >>> _tool_event(2, "read_file", "ok", "文件内容", 0.123)
+        {'type': 'tool', 'round': 2, 'name': 'read_file', 'status': 'ok', 'seconds': 0.12, 'chars': 4}
+    """
+    return {
+        "type": "tool",
+        "round": round_no,
+        "name": name,
+        "status": status,
+        "seconds": round(seconds, 2),
+        "chars": len(content),
+    }
 
 
 def _with_hint(text: str) -> str:
@@ -135,6 +162,11 @@ class AgentRunSpec:
                           问你、在网页上弹个框，还是自动评估里直接放行——
                           循环层不碰产品层。main.py 传的是在终端里问你的 ask_permission。
 
+        on_event:         每有一件事就交给谁（改造 6）。一个函数，收一个字典（一条事件）：
+                          调完一次模型交一条 "model"，处理完一个工具调用交一条 "tool"。
+                          **不传就是 None = 不交**。main.py 传的是 session/events.py 的
+                          EventLog，它把事件记进 data/events/。事件长什么样见那个文件开头。
+
     为什么要专门定义一个类，而不是给 run() 加一堆参数
         参数只会越加越多（nanobot 的对应结构有 26 个字段）。做成一张订单之后，
         加字段不用改 run() 的签名，调用方也不用记参数顺序。
@@ -152,6 +184,7 @@ class AgentRunSpec:
     max_iterations: int = 10
     tools: dict[str, Tool] = field(default_factory=dict)
     confirm: Callable[[str, dict], bool] | None = None
+    on_event: Callable[[dict], None] | None = None
 
 
 @dataclass
@@ -250,6 +283,10 @@ class AgentRunner:
             临时的观察信息，不是功能。第一行是"尺子"量出来的估算值，
             第二行是模型回来之后的真实值和缓存命中率。两者对照能看出
             尺子准不准、缓存有没有被打断。调试完可以删。
+
+            改造 6 之后，同样这些数字还会作为 "model" 事件交给 on_event，
+            记进 data/events/，关掉窗口也不丢。等以后做界面时，这两行打印
+            应该改成由事件来驱动，runner 自己就不再 print 了。
         """
         # 拷一份，不改调用方的列表。
         # 注意这是**浅拷贝**：列表是新的，但里面的消息字典还是同一批对象。
@@ -277,7 +314,18 @@ class AgentRunner:
             # ── 第二步：调模型 ──
             # 重试、超时、字段翻译全部关在 provider 内部。
             # 在 runner 眼里，这是一个"要么成功、要么彻底失败"的操作。
+            started = time.perf_counter()
             reply = await spec.provider.chat(payload, tools=schemas)
+            _emit(spec, {                                 # 改造 6：这一圈花了多少
+                "type": "model",
+                "round": i + 1,
+                "seconds": round(time.perf_counter() - started, 2),
+                "estimated": used,                        # 尺子量的
+                "prompt": reply.usage.prompt_tokens,      # 模型说的
+                "cache_hit": reply.usage.cache_hit_tokens,
+                "output": reply.usage.completion_tokens,
+                "tool_calls": len(reply.tool_calls),
+            })
 
             u = reply.usage                                             # 临时观察
             if u.prompt_tokens:
@@ -317,6 +365,7 @@ class AgentRunner:
                         "tool_call_id": call.id,
                         "content": content,
                     })
+                    _emit(spec, _tool_event(i + 1, call.name, "unknown", content))
                     continue
 
                 # 情况 B：参数那段 JSON 是坏的（少括号、字段名拼错）。
@@ -330,6 +379,7 @@ class AgentRunner:
                         "tool_call_id": call.id,
                         "content": content,
                     })
+                    _emit(spec, _tool_event(i + 1, call.name, "bad_args", content))
                     continue
 
                 # 情况 C：正常执行。
@@ -346,8 +396,10 @@ class AgentRunner:
                         "tool_call_id": call.id,
                         "content": DENIED_TEXT,
                     })
+                    _emit(spec, _tool_event(i + 1, call.name, "denied", DENIED_TEXT))
                     continue
 
+                started = time.perf_counter()
                 try:
                     result = await tool.execute(**call.arguments)
                 except asyncio.CancelledError:
@@ -375,7 +427,8 @@ class AgentRunner:
                 # 工具返回的是 ToolResult 且标了错误时，补上行动建议。
                 # 用 getattr 而不是直接 result.is_error，是因为工具成功时
                 # 可以直接返回普通 str，那种情况下没有这个属性。
-                if getattr(result, "is_error", False):
+                failed = getattr(result, "is_error", False)
+                if failed:
                     content = _with_hint(content)
 
                 messages.append({
@@ -383,6 +436,10 @@ class AgentRunner:
                     "tool_call_id": call.id,
                     "content": content,
                 })
+                _emit(spec, _tool_event(
+                    i + 1, call.name, "error" if failed else "ok", content,
+                    time.perf_counter() - started,
+                ))
             # 循环体走完 → 自动进入下一圈，把工具结果带给模型
         else:
             # for 正常跑完（没 break）才会到这里 = 转满圈数还没结束

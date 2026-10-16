@@ -37,6 +37,7 @@
         /memory        看当前的长期记忆
         /memory-log    看最近几次整理各改了什么（程序算的 diff，不是模型自述）
         /memory-undo   记忆被改坏了，退回上一版
+        /cost          看这个会话一共转了几圈、花了多少 token、调了哪些工具（改造 6）
 
 ──────────────────────────────────────────────────────────────
 一轮对话的完整顺序（这是本文件的核心）
@@ -98,6 +99,7 @@ from agent.tools.loader import discover_tools
 from config.loader import load_agent_defaults, load_config, load_mcp_servers
 from providers.factory import create_provider
 from session import manager
+from session.events import EventLog, format_summary, read_events, summarize
 
 # ── 模块级初始化：程序一启动就做，做一次 ──
 #
@@ -314,6 +316,7 @@ async def run_local_command(cmd: str, provider, session_key: str = "") -> bool:
         /memory-undo   退回上一版
         /correct 正确的说法   记一条纠正，并立刻整理
         /why 关键词           查一句话的出处和所属会话
+        /cost          看这个会话花了多少（读 data/events/，不调模型）
 
     例子（要调模型/碰文件，不写成 doctest）
         "/memory-log" 没有快照时  ->  打印"还没有任何快照"，返回 False
@@ -410,9 +413,14 @@ async def run_local_command(cmd: str, provider, session_key: str = "") -> bool:
         print(f"\n  想看原文：python main.py --session <出处>\n")
         return False
 
+    if cmd == "/cost":
+        # 改造 6：把这个会话记下的事件加总。只读文件，不调模型，不花钱。
+        print(f"\n{format_summary(summarize(read_events(session_key)), session_key)}\n")
+        return False
+
     print(
         "\n  不认识的命令。可用：/dream  /memory  /memory-log  /memory-undo"
-        "  /correct 正确的说法  /why 关键词"
+        "  /correct 正确的说法  /why 关键词  /cost"
         "\n  （要跟模型说以 / 开头的话，换个说法，比如去掉开头的斜杠）\n"
     )
     return False
@@ -472,6 +480,7 @@ async def chat(args: argparse.Namespace, tools: dict) -> None:
     runner = AgentRunner()
 
     session = open_session(args.session, cfg.model)
+    events = EventLog(session.key)      # 改造 6：每一圈做了什么、花了多少，记进 data/events/
 
     # 组装这次运行要用的 messages。两部分：
     #   [0]  系统提示 —— 只活在内存里，**不会**写进存档（见设计文档 §3）
@@ -514,6 +523,7 @@ async def chat(args: argparse.Namespace, tools: dict) -> None:
 
         # ── ③ 把用户这句话入链 ──
         messages.append({"role": "user", "content": user_input})
+        events.start_turn()             # 改造 6：新的一轮。失败回滚时这条也不撤——钱是真花了
 
         # ── ④ 交给 runner 转循环 ──
         # runner 会一直转到模型不再要求调工具（或转满 max_iterations）。
@@ -527,6 +537,7 @@ async def chat(args: argparse.Namespace, tools: dict) -> None:
                     tools=tools,                # 第 40 讲：不再是 TOOLS，而是带上了 MCP 工具的那张表
                     max_iterations=settings.max_iterations,
                     confirm=ask_permission,     # 改造 5：会改动东西的工具，执行前先问你
+                    on_event=events,            # 改造 6：每有一件事就交给它记下来
                 )
             )
         except Exception as exc:
